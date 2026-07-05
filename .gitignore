@@ -1,0 +1,50 @@
+# ── 의존성 / 빌드 산출물 (생성물) ─────────────────────────
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+dist_exe/
+build_exe_work/
+*.spec
+*.tsbuildinfo
+
+# ── Python ────────────────────────────────────────────────
+backend/.venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# ── Phase 3 WSL 실스택 랩 키트 (가입자 인증키 K/OPc·IMSI·랩 네트워크 포함 → 비공개) ──
+# 로컬 WSL(Open5GS/UERANSIM/PacketRusher) 환경 전용 스크립트·설정. 시뮬레이터 실행엔 불필요.
+backend/*.sh
+backend/*.yaml
+backend/*.yml
+
+# ── 로컬 도구/에디터/OS ───────────────────────────────────
+.claude/
+.vscode/
+.idea/
+*.log
+Thumbs.db
+.DS_Store
+
+# ── 보안 필터링 내역 보고서 (민감값 요약 → 절대 커밋 금지) ──
+SECURITY_FILTER_REPORT.md
+
+# ── 공개 저장소에는 실행/빌드에 필요한 파일만 — 아래는 로컬에만 보관(문서·개발노트·중복 스크립트·테스트/린트 설정·EXE 패키징·바로가기) ──
+/DEVNOTE.md
+/docs/
+/setup.bat
+/frontend/README.md
+/backend/test_rt.py
+/backend/test_physics.py
+/frontend/.oxlintrc.json
+/build_exe.bat
+/PACKAGING.md
+/backend/run_server.py
+/backend/requirements-build.txt
+/바탕화면_바로가기_만들기.bat
+/종료.bat
+/실행매뉴얼.md
