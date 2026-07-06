@@ -8,7 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
-dist
+# dist 는 일부러 커밋한다 — clone 후 start.bat 만으로 8000에서 UI 서빙 (Node 불필요)
 dist-ssr
 *.local
 
