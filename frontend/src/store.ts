@@ -412,13 +412,14 @@ function demoCore(): CoreNf[] {
   ]
 }
 
-const PERSIST_KEY = 'meta-5g-scene-v1'
-const LEGACY_PERSIST_KEY = 'dt-telecom-scene-v1' // 구버전 저장분 자동 이관용
+// v2: 기본 씬에 RAN(CU/DU)↔Core(AMF/UPF) 연결을 반영. 배선 전에 저장된 옛 씬(v1)이
+// 로드되어 "CU/DU/RU/AMF 미연결"로 시작하던 문제를 막기 위해 키를 올려 옛 저장분은 무시한다.
+const PERSIST_KEY = 'meta-5g-scene-v2'
 
 // F5(새로고침)에도 구성이 유지되도록 localStorage에서 초기 상태 복원.
 function loadPersisted(): Partial<State> | null {
   try {
-    const raw = localStorage.getItem(PERSIST_KEY) ?? localStorage.getItem(LEGACY_PERSIST_KEY)
+    const raw = localStorage.getItem(PERSIST_KEY)
     if (!raw) return null
     const d = JSON.parse(raw)
     if (!d.objects || !d.space) return null
@@ -430,7 +431,7 @@ function loadPersisted(): Partial<State> | null {
     }
     if (maxId >= idCounter) idCounter = maxId + 1
     let floorPlan = d.floorPlan ?? null
-    try { floorPlan = localStorage.getItem(PERSIST_KEY + '-plan') ?? localStorage.getItem(LEGACY_PERSIST_KEY + '-plan') ?? floorPlan } catch { /* ignore */ }
+    try { floorPlan = localStorage.getItem(PERSIST_KEY + '-plan') ?? floorPlan } catch { /* ignore */ }
     return {
       space: d.space, objects: d.objects, coreNfs: d.coreNfs, coreDn: d.coreDn,
       ranArch: d.ranArch, ranUnits: d.ranUnits ?? [], homeZone: d.homeZone, ceiling: d.ceiling, slices: d.slices,
