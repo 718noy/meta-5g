@@ -26,9 +26,13 @@ import {
   DEFAULT_UE_SIM,
   activeNf,
   computeAllowedNssai,
+  computeE2E,
   defaultImsi,
+  objZone,
   imsiRegistered,
   imsiWithMsin,
+  ranChainOk,
+  ranChainText,
   suciOf,
   supiOf,
   trafficInfo,
@@ -94,6 +98,21 @@ function flowCtxForPerson(s: State, obj: SceneObject) {
   return { ueName: obj.name, servingName: serving, pci: servPci, amf: nf('AMF'), smf: nf('SMF'), upf: nf('UPF'), ueIp }
 }
 
+// UE의 서빙 RU = 같은 존에서 송출 중인 가장 가까운 RU(gnb). togglePersonUe/attach와 동일한 최근접 선택.
+function servingRuFor(ue: SceneObject, objects: SceneObject[]): SceneObject | undefined {
+  const zone = (ue.zone ?? 'A') as Zone
+  const rus = objects.filter(
+    (o) => o.kind === 'gnb' && (o.zone ?? 'A') === zone && o.gnb?.enabled !== false,
+  )
+  let best: SceneObject | undefined
+  let bd = Infinity
+  for (const r of rus) {
+    const d = (r.position[0] - ue.position[0]) ** 2 + (r.position[2] - ue.position[2]) ** 2
+    if (d < bd) { bd = d; best = r }
+  }
+  return best
+}
+
 export type CallPhase =
   | 'idle' | 'inviting' | 'ringing' | 'active' | 'ended' | 'failed'
 export interface CallState {
@@ -132,6 +151,7 @@ interface State {
     t310_ms: number // RLF: 물리계층 문제 지속 시 T310 만료→RLF
     n310: number // 연속 out-of-sync 지시 횟수
     call_drop_rsrp_dbm: number // 이 RSRP 밑으로 떨어지면 통화 드롭 (Qout 근사)
+    rlf_rsrp_dbm: number // RLF 판정 RSRP 문턱 (Qout) — 이 밑이면 무선링크 실패
   }
   selectedId: string | null
   selectedIds: string[] // 다중 선택 (박스 선택). selectedId는 대표(첫 항목)
@@ -357,9 +377,19 @@ function demoScene(): SceneObject[] {
     {
       id: nextId(), kind: 'gnb', name: 'RU-A1',
       position: [78, 0, 52], rotation_deg: 0, zone: 'A',
-      gnb: { ...DEFAULT_GNB },
+      // RU→DU(프론트홀)→CU(F1)→AMF(N2)/UPF(N3) 사슬을 데모에서 바로 성립시키기 위해 DU에 연결.
+      gnb: { ...DEFAULT_GNB, du_id: 'ran-A-du-1' },
     },
     { id: nextId(), kind: 'person', name: 'UE-A1', position: [72, 0, 60], rotation_deg: -45, zone: 'A' },
+  ]
+}
+
+// 데모 RAN 논리 유닛: zone-A CU 1대 + DU 1대. CU는 demoCore의 AMF(N2)/UPF(N3)에 종단.
+//   demoCore()가 만드는 id: AMF=nf-A-AMF-1, UPF=nf-A-UPF-1.
+function demoRan(): RanUnit[] {
+  return [
+    { id: 'ran-A-cu-1', kind: 'cu', name: 'CU-A1', zone: 'A', enabled: true, amf_id: 'nf-A-AMF-1', upf_id: 'nf-A-UPF-1' },
+    { id: 'ran-A-du-1', kind: 'du', name: 'DU-A1', zone: 'A', enabled: true, cu_id: 'ran-A-cu-1', f1_latency_ms: 2, max_cells: 4 },
   ]
 }
 
@@ -419,7 +449,7 @@ export const useStore = create<State>((set, get) => ({
   coreNfs: demoCore(),
   coreDn: { A: true, B: false, C: false },
   ranArch: { A: 'gnb', B: 'gnb', C: 'gnb' },
-  ranUnits: [],
+  ranUnits: demoRan(),
   homeZone: 'A',
   ceiling: true,
   floorPlan: null,
@@ -431,7 +461,7 @@ export const useStore = create<State>((set, get) => ({
   mobility: {
     a3_offset_db: 3, hysteresis_db: 1, ttt_ms: 320,
     cio_db: 0, a2_threshold_dbm: -110, t310_ms: 1000, n310: 10,
-    call_drop_rsrp_dbm: -118,
+    call_drop_rsrp_dbm: -118, rlf_rsrp_dbm: -118,
   },
   selectedId: null,
   selectedIds: [],
@@ -529,6 +559,10 @@ export const useStore = create<State>((set, get) => ({
           : rk === 'ceiling' ? { ru_type: 'active', mount: 'ceiling', band_class: 'mid', height: Math.max(s.space.height - 0.3, 3) }
             : rk === 'wall' ? { ru_type: 'active', mount: 'wall', height: 3 }
               : { ru_type: 'active', mount: 'pole' }
+      // 새 RU는 해당 존의 첫 번째 활성 DU에 자동 프론트홀 연결 (없으면 미연결 → 사슬 불성립, 의도된 동작)
+      const autoDuId = realKind === 'gnb'
+        ? s.ranUnits.find((u) => u.kind === 'du' && u.zone === zone && u.enabled)?.id
+        : undefined
       const obj: SceneObject = {
         id: nextId(),
         kind: realKind,
@@ -537,7 +571,7 @@ export const useStore = create<State>((set, get) => ({
         rotation_deg: rot,
         size: CATALOG[realKind].resizable ? [...CATALOG[realKind].size] : undefined,
         // PCI는 셀마다 자동 순차 할당 (mod3 충돌 회피용 간격 7) — 직접 수정 가능
-        gnb: realKind === 'gnb' ? { ...DEFAULT_GNB, ...radioPreset, pci: (gnbCount * 7 + 1) % 1008 } : undefined,
+        gnb: realKind === 'gnb' ? { ...DEFAULT_GNB, ...radioPreset, pci: (gnbCount * 7 + 1) % 1008, du_id: autoDuId } : undefined,
         ant_height: isAntenna ? (realKind === 'antwall' ? 3 : 4) : undefined,
         cable: isAntenna ? 'half' : undefined,
         ueShell: isFixedUe ? 'machine' : undefined,
@@ -655,7 +689,15 @@ export const useStore = create<State>((set, get) => ({
   },
 
   removeCoreNf: (id) =>
-    set((s) => ({ coreNfs: s.coreNfs.filter((n) => n.id !== id) })),
+    set((s) => ({
+      coreNfs: s.coreNfs.filter((n) => n.id !== id),
+      // 삭제되는 NF를 N2/N3 종단으로 참조하던 CU의 링크는 dangling 방지 위해 해제
+      ranUnits: s.ranUnits.map((u) =>
+        u.amf_id === id || u.upf_id === id
+          ? { ...u, amf_id: u.amf_id === id ? undefined : u.amf_id, upf_id: u.upf_id === id ? undefined : u.upf_id }
+          : u,
+      ),
+    })),
 
   setCoreDn: (zone, v) =>
     set((s) => ({ coreDn: { ...s.coreDn, [zone]: v } })),
@@ -766,13 +808,15 @@ export const useStore = create<State>((set, get) => ({
     // lte(eNB)는 ParamsPanel의 tech 전환과 동일하게 1800MHz/sector로 구성.
     const techPreset: Partial<import('./types').GnbParams> =
       tech === 'lte' ? { radio_tech: 'lte', freq_mhz: 1800, antenna: 'sector' } : { radio_tech: 'nr' }
+    // 새 RU는 해당 존의 첫 번째 활성 DU에 자동 프론트홀 연결 (없으면 미연결 → 사슬 불성립, 의도된 동작)
+    const autoDuId = s0.ranUnits.find((u) => u.kind === 'du' && u.zone === zone && u.enabled)?.id
     const obj: SceneObject = {
       id: nextId(),
       kind: 'gnb',
       name: makeName('gnb', s0.objects, zone),
       position: [x, 0, z],
       rotation_deg: 0,
-      gnb: { ...DEFAULT_GNB, ...techPreset, pci: (gnbCount * 7 + 1) % 1008 },
+      gnb: { ...DEFAULT_GNB, ...techPreset, pci: (gnbCount * 7 + 1) % 1008, du_id: autoDuId },
       zone,
     }
     // 새 RU를 선택 상태로 → 사용자가 바로 파라미터를 설정할 수 있게.
@@ -973,6 +1017,51 @@ export const useStore = create<State>((set, get) => ({
         target?.name)
       return
     }
+    // RAN 경로(RU→프론트홀→DU→F1→CU→N2→AMF & N3→UPF) + RSRP 게이트 — 트래픽/통화 시작 전 공통 가드.
+    // 막히면 에러 로그를 남기고 true(차단) 반환. (전원/UAC/등록/착신자 체크 이후, 실제 활성화 직전)
+    const ranBlocked = (): boolean => {
+      if (!on) return false
+      const s0 = get()
+      const imsi = s0.personImsi[id] ?? defaultImsi(s0.ueSim)
+      const servingRu = target ? servingRuFor(target, s0.objects) : undefined
+      const chain = servingRu
+        ? ranChainOk(servingRu, s0.objects, s0.ranUnits, s0.coreNfs, s0.siteDown)
+        : { ok: false, reason: 'RU-off' as string }
+      if (!servingRu || !chain.ok) {
+        get().addEvent('RU', 'error',
+          pick(s0.lang,
+            `${target?.name}: 트래픽/통화 불가 — ${ranChainText(chain.reason, 'ko')}`,
+            `${target?.name}: traffic/call blocked — ${ranChainText(chain.reason, 'en')}`,
+            `${target?.name}: 流量/通话不可 — ${ranChainText(chain.reason, 'zh')}`),
+          target?.name, undefined, imsi)
+        return true
+      }
+      const rsrp = s0.personProbes[id]?.rsrp_dbm
+      const thr = s0.mobility.call_drop_rsrp_dbm
+      if (rsrp != null && rsrp < thr) {
+        get().addEvent('RU', 'error',
+          pick(s0.lang,
+            `${target?.name}: RSRP ${rsrp.toFixed(1)} < 콜드롭 기준 ${thr} — 접속 불가 (커버리지 밖)`,
+            `${target?.name}: RSRP ${rsrp.toFixed(1)} < call-drop threshold ${thr} — cannot connect (out of coverage)`,
+            `${target?.name}: RSRP ${rsrp.toFixed(1)} < 掉话门限 ${thr} — 无法接入 (超出覆盖)`),
+          target?.name, undefined, imsi)
+        return true
+      }
+      // 코어 E2E(등록 AMF/AUSF/UDM + 세션 SMF/UPF + DN) 미도달 → 트래픽/통화 불가.
+      // (RAN 사슬은 AMF/UPF까지만 검증하므로 SMF/AUSF/UDM/DN 상실을 여기서 잡는다.)
+      const e2e = computeE2E(s0.objects, s0.coreNfs, s0.coreDn, objZone(target!), s0.siteDown, s0.ranUnits)
+      if (!e2e.ok) {
+        get().addEvent('NF', 'error',
+          pick(s0.lang,
+            `${target?.name}: 트래픽/통화 불가 — 코어 미도달(${e2e.missing.join(', ')})`,
+            `${target?.name}: traffic/call blocked — core unreachable (${e2e.missing.join(', ')})`,
+            `${target?.name}: 流量/通话不可 — 核心不可达(${e2e.missing.join(', ')})`),
+          target?.name, undefined, imsi)
+        return true
+      }
+      return false
+    }
+
     // 서비스 종류 판정 (per-UE 미지정 시 전역 기본)
     const ttype = get().personTrafficType[id] ?? get().trafficType
 
@@ -991,6 +1080,8 @@ export const useStore = create<State>((set, get) => ({
             target?.name)
           return
         }
+        // RAN 경로/RSRP 게이트 — 사슬이 끊겼거나 커버리지 밖이면 통화 발신 차단.
+        if (ranBlocked()) return
         set((s) => ({ personTraffic: { ...s.personTraffic, [id]: true } }))
         if (target) {
           const imsi = get().personImsi[id] ?? defaultImsi(get().ueSim)
@@ -1019,6 +1110,8 @@ export const useStore = create<State>((set, get) => ({
     }
 
     // ── 데이터 서비스: 기존 Service Request + PDU 흐름 ──
+    // RAN 경로/RSRP 게이트 — 사슬이 끊겼거나 커버리지 밖이면 트래픽 활성화 차단.
+    if (ranBlocked()) return
     set((s) => ({ personTraffic: { ...s.personTraffic, [id]: on } }))
     if (target) {
       // SECTION A: 이미 RM-REGISTERED인 UE가 다시 데이터 시작 → full re-attach 대신
@@ -1283,6 +1376,36 @@ export const useStore = create<State>((set, get) => ({
     const suppFrom = st.personSupp[fromId] ?? {}
     const origTo = st.objects.find((o) => o.id === toId)
     if (!origTo) return
+
+    // ── RAN 경로(RU→프론트홀→DU→F1→CU→N2→AMF & N3→UPF) + RSRP 게이트 ──
+    // 발신 단말의 무선구간 사슬이 끊겼거나 커버리지 밖이면 INVITE 진행 없이 통화 실패 처리.
+    {
+      const servingRu = servingRuFor(from, st.objects)
+      const chain = servingRu
+        ? ranChainOk(servingRu, st.objects, st.ranUnits, st.coreNfs, st.siteDown)
+        : { ok: false, reason: 'RU-off' as string }
+      const rsrp = st.personProbes[fromId]?.rsrp_dbm
+      const lowRsrp = rsrp != null && rsrp < st.mobility.call_drop_rsrp_dbm
+      const chainBroken = !servingRu || !chain.ok
+      if (chainBroken || lowRsrp) {
+        const reason = chainBroken ? ranChainText(chain.reason, L) : 'RSRP too low'
+        const imsi = st.personImsi[fromId] ?? defaultImsi(st.ueSim)
+        get().addEvent('RU', 'error',
+          pick(L,
+            `${from.name}: 통화 시작 불가 — ${chainBroken ? ranChainText(chain.reason, 'ko') : 'RSRP 부족(커버리지 밖)'}`,
+            `${from.name}: cannot start call — ${chainBroken ? ranChainText(chain.reason, 'en') : 'RSRP too low (out of coverage)'}`,
+            `${from.name}: 无法发起通话 — ${chainBroken ? ranChainText(chain.reason, 'zh') : 'RSRP 过低(超出覆盖)'}`),
+          from.name, undefined, imsi)
+        set({
+          call: {
+            fromId, toId, fromName: from.name, toName: origTo.name, phase: 'failed',
+            interPlmn: (from.zone ?? 'A') !== (origTo.zone ?? 'A'), startedSec: null,
+            reason,
+          },
+        })
+        return
+      }
+    }
 
     // ── MMTEL 부가서비스(TAS/iFC) 발신측 처리 ──
     // 발신 통신 차단 (OCB / BAOC, TS 24.611) — 발신측 TAS가 발신을 즉시 차단.
@@ -1764,7 +1887,7 @@ export const useStore = create<State>((set, get) => ({
       coreNfs: demoCore(),
       coreDn: { A: true, B: false, C: false },
       ranArch: { A: 'gnb', B: 'gnb', C: 'gnb' },
-      ranUnits: [],
+      ranUnits: demoRan(),
       slices: [{ id: 'sl-A-1', sst: 1, sd: '000001', name: 'eMBB', zone: 'A' }],
       homeZone: 'A', ceiling: true, floorPlan: null,
       selectedId: null, dragging: null, tool: 'select', mode: 'edit',
@@ -2100,6 +2223,41 @@ export const useStore = create<State>((set, get) => ({
   toggleTraffic: () => {
     const active = !get().trafficActive
     if (active) {
+      // RAN 경로(RU→프론트홀→DU→F1→CU→N2→AMF & N3→UPF) + RSRP 게이트 —
+      // 걷는 UE의 서빙 셀(probe.serving = RU id) 무선구간이 성립해야 트래픽 시작.
+      const s0 = get()
+      const probe = s0.probe
+      const servingRu = probe?.serving ? s0.objects.find((o) => o.id === probe.serving) : undefined
+      const chain = servingRu
+        ? ranChainOk(servingRu, s0.objects, s0.ranUnits, s0.coreNfs, s0.siteDown)
+        : { ok: false, reason: 'RU-off' as string }
+      const rsrp = probe?.rsrp_dbm
+      const thr = s0.mobility.call_drop_rsrp_dbm
+      const lowRsrp = rsrp != null && rsrp < thr
+      const chainBroken = !servingRu || !chain.ok
+      if (chainBroken || lowRsrp) {
+        get().addEvent('RU', 'error',
+          pick(s0.lang,
+            `트래픽 시작 불가 — ${chainBroken ? ranChainText(chain.reason, 'ko') : `RSRP ${rsrp!.toFixed(1)} < 콜드롭 기준 ${thr} (커버리지 밖)`}`,
+            `Traffic blocked — ${chainBroken ? ranChainText(chain.reason, 'en') : `RSRP ${rsrp!.toFixed(1)} < call-drop threshold ${thr} (out of coverage)`}`,
+            `流量不可 — ${chainBroken ? ranChainText(chain.reason, 'zh') : `RSRP ${rsrp!.toFixed(1)} < 掉话门限 ${thr} (超出覆盖)`}`),
+          servingRu?.name)
+        return
+      }
+      // 코어 E2E(등록 AMF/AUSF/UDM + 세션 SMF/UPF + DN) 미도달 → 트래픽 시작 불가.
+      const zone = s0.ueZone
+      if (zone) {
+        const e2e = computeE2E(s0.objects, s0.coreNfs, s0.coreDn, zone, s0.siteDown, s0.ranUnits)
+        if (!e2e.ok) {
+          get().addEvent('NF', 'error',
+            pick(s0.lang,
+              `트래픽 시작 불가 — 코어 미도달(${e2e.missing.join(', ')})`,
+              `Traffic blocked — core unreachable (${e2e.missing.join(', ')})`,
+              `流量不可 — 核心不可达(${e2e.missing.join(', ')})`),
+            servingRu?.name)
+          return
+        }
+      }
       set({ trafficActive: true, trafficMb: 0, trafficMbps: 0 })
       get().addEvent('UE', 'info',
         pick(get().lang, 'PDU 세션 데이터 전송 시작', 'PDU session data transfer started', 'PDU 会话数据传输开始'))

@@ -6,7 +6,7 @@ import { useStore } from '../store'
 import { frontRef } from './zorder'
 import { usePanelDrag } from './panelDrag'
 import type { CoreNf, NfType, RanUnit, SceneObject, Zone } from '../types'
-import { DEFAULT_MAX_REPLICAS, NF_CAPACITY_PER_POD, NF_INFO, NF_TYPES, ZONES, activeNf, objZone } from '../types'
+import { DEFAULT_MAX_REPLICAS, NF_CAPACITY_PER_POD, NF_INFO, NF_TYPES, ZONES, activeNf, nfUp, objZone } from '../types'
 
 function NfRow({ nf }: { nf: CoreNf }) {
   const updateCoreNf = useStore((s) => s.updateCoreNf)
@@ -306,7 +306,7 @@ export function CorePanel() {
     <div className="corepanel panel" ref={frontRef} style={dragStyle}>
       <div className="log-head" {...headerProps}>
         <span className="section-label">
-          ☁ {pick(lang, '5G Core 구성 (논리)', '5G Core Configuration (logical)', '5G 核心网配置 (逻辑)')}
+          📡 {pick(lang, 'RAN/Core 구성', 'RAN/Core Configuration', 'RAN/Core 配置')}
         </span>
         <button
           className="log-btn"
@@ -440,14 +440,27 @@ function SiteFailureBar() {
 
 // CU 행 — 이름 + 가동 토글 + 삭제 + 소속 DU 수 상태
 function RanCuRow({ cu }: { cu: RanUnit }) {
+  const [open, setOpen] = useState(false)
   const lang = useStore((s) => s.lang)
   const ranUnits = useStore((s) => s.ranUnits)
+  const coreNfs = useStore((s) => s.coreNfs)
+  const siteDown = useStore((s) => s.siteDown)
+  const updateRanUnit = useStore((s) => s.updateRanUnit)
   const toggleRanUnit = useStore((s) => s.toggleRanUnit)
   const removeRanUnit = useStore((s) => s.removeRanUnit)
   const duCount = ranUnits.filter((u) => u.kind === 'du' && u.cu_id === cu.id).length
+
+  const amfs = coreNfs.filter((n) => n.nf_type === 'AMF' && n.zone === cu.zone)
+  const upfs = coreNfs.filter((n) => n.nf_type === 'UPF' && n.zone === cu.zone)
+  const linkedAmf = cu.amf_id ? coreNfs.find((n) => n.id === cu.amf_id && n.nf_type === 'AMF') : undefined
+  const linkedUpf = cu.upf_id ? coreNfs.find((n) => n.id === cu.upf_id && n.nf_type === 'UPF') : undefined
+  const amfOk = linkedAmf ? nfUp(linkedAmf, siteDown) : false
+  const upfOk = linkedUpf ? nfUp(linkedUpf, siteDown) : false
+  const coreConnected = !!cu.amf_id && !!cu.upf_id
+
   return (
     <div className={`nf-row ${cu.enabled ? '' : 'off'}`}>
-      <div className="nf-row-head">
+      <div className="nf-row-head" onClick={() => setOpen(!open)}>
         <span className="nf-dot" style={{ background: '#3da9ff' }} />
         <b>{cu.name}</b>
         <span className="nf-meta">
@@ -468,6 +481,49 @@ function RanCuRow({ cu }: { cu: RanUnit }) {
           ✕
         </button>
       </div>
+      {open && (
+        <div className="nf-row-body">
+          <label className="field" title={pick(lang, 'N2/NGAP로 CU-CP가 연결되는 AMF', 'AMF that CU-CP connects to over N2/NGAP', 'CU-CP通过N2/NGAP连接的AMF')}>
+            <span>{pick(lang, '연결 AMF (N2)', 'Linked AMF (N2)', '连接AMF (N2)')}</span>
+            <select
+              value={cu.amf_id ?? ''}
+              onChange={(e) => updateRanUnit(cu.id, { amf_id: e.target.value || undefined })}
+            >
+              <option value="">{pick(lang, '(없음)', '(none)', '(无)')}</option>
+              {amfs.map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </select>
+          </label>
+          <label className="field" title={pick(lang, 'N3/GTP-U로 CU-UP가 연결되는 UPF', 'UPF that CU-UP connects to over N3/GTP-U', 'CU-UP通过N3/GTP-U连接的UPF')}>
+            <span>{pick(lang, '연결 UPF (N3)', 'Linked UPF (N3)', '连接UPF (N3)')}</span>
+            <select
+              value={cu.upf_id ?? ''}
+              onChange={(e) => updateRanUnit(cu.id, { upf_id: e.target.value || undefined })}
+            >
+              <option value="">{pick(lang, '(없음)', '(none)', '(无)')}</option>
+              {upfs.map((n) => (
+                <option key={n.id} value={n.id}>{n.name}</option>
+              ))}
+            </select>
+          </label>
+          {coreConnected ? (
+            <div className="material-note" style={{ color: amfOk && upfOk ? '#2bd680' : '#ff6b6b' }}>
+              {amfOk && upfOk
+                ? `✓ ${linkedAmf!.name} · ${linkedUpf!.name}`
+                : `⚠ ${!amfOk ? pick(lang, 'AMF 미연결/비활성', 'AMF down/unlinked', 'AMF未连接/停用') : linkedAmf!.name}` +
+                  ` · ${!upfOk ? pick(lang, 'UPF 미연결/비활성', 'UPF down/unlinked', 'UPF未连接/停用') : linkedUpf!.name}`}
+            </div>
+          ) : (
+            <div className="material-note" style={{ color: '#ff6b6b' }}>
+              {pick(lang,
+                '⚠ CU가 Core에 미연결 → 이 CU 하위 RU들 트래픽/통화 불가',
+                '⚠ CU not connected to Core → RUs under this CU cannot carry traffic/calls',
+                '⚠ CU未连接到核心网 → 此CU下的RU无法承载流量/通话')}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -481,9 +537,25 @@ function RanDuRow({ du }: { du: RanUnit }) {
   const updateRanUnit = useStore((s) => s.updateRanUnit)
   const removeRanUnit = useStore((s) => s.removeRanUnit)
   const toggleRanUnit = useStore((s) => s.toggleRanUnit)
+  const coreNfs = useStore((s) => s.coreNfs)
+  const siteDown = useStore((s) => s.siteDown)
   const cus = ranUnits.filter((u) => u.kind === 'cu' && u.zone === du.zone)
   const parentCu = cus.find((c) => c.id === du.cu_id)
   const connectedRus = objects.filter((o) => o.kind === 'gnb' && o.gnb?.du_id === du.id)
+
+  // CU를 통해 도달하는 Core(N2 AMF / N3 UPF) — 읽기 전용 표시
+  const coreAmf = parentCu?.amf_id ? coreNfs.find((n) => n.id === parentCu.amf_id && n.nf_type === 'AMF') : undefined
+  const coreUpf = parentCu?.upf_id ? coreNfs.find((n) => n.id === parentCu.upf_id && n.nf_type === 'UPF') : undefined
+  const coreAmfOk = coreAmf ? nfUp(coreAmf, siteDown) : false
+  const coreUpfOk = coreUpf ? nfUp(coreUpf, siteDown) : false
+  const coreOk = !!parentCu && coreAmfOk && coreUpfOk
+  const coreMissing = !parentCu
+    ? pick(lang, 'CU 미연결', 'no CU', '未连CU')
+    : !coreAmfOk
+      ? pick(lang, 'CU→AMF 미연결', 'CU→AMF missing', 'CU→AMF未连接')
+      : !coreUpfOk
+        ? pick(lang, 'CU→UPF 미연결', 'CU→UPF missing', 'CU→UPF未连接')
+        : ''
   return (
     <div className={`nf-row ${du.enabled ? '' : 'off'}`}>
       <div className="nf-row-head" onClick={() => setOpen(!open)}>
@@ -555,6 +627,11 @@ function RanDuRow({ du }: { du: RanUnit }) {
                   `연결 RU (${connectedRus.length}/${du.max_cells ?? 4}): `,
                   `Connected RUs (${connectedRus.length}/${du.max_cells ?? 4}): `,
                   `连接RU (${connectedRus.length}/${du.max_cells ?? 4}): `) + connectedRus.map((r) => r.name).join(', ')}
+          </div>
+          <div className="material-note" style={{ color: coreOk ? '#2bd680' : '#ff6b6b' }}>
+            {coreOk
+              ? `→ ${parentCu!.name} → ${coreAmf!.name} (N2) · ${coreUpf!.name} (N3)`
+              : `⚠ ${pick(lang, 'Core 미도달', 'Core unreachable', '核心网不可达')}: ${coreMissing}`}
           </div>
         </div>
       )}
@@ -719,6 +796,7 @@ function MobilitySection() {
     t310_ms: ['T310 — 하향품질 저하 지속 시 만료→무선링크실패(RLF)', 'T310 — expires on sustained poor downlink → Radio Link Failure', 'T310 — 下行质量持续变差超时→无线链路失败(RLF)'],
     n310: ['N310 — RLF 판정 전 연속 불량 지시 횟수', 'N310 — consecutive out-of-sync indications before RLF', 'N310 — 判定RLF前连续失步次数'],
     call_drop_rsrp_dbm: ['통화드롭 RSRP — 이 세기 아래로 떨어지면 통화 끊김', 'Call-drop RSRP — call drops when signal falls below this', '掉话RSRP — 信号低于此值时通话中断'],
+    rlf_rsrp_dbm: ['RLF RSRP 기준 — 이 값 미만이 T310 동안 지속되면 무선링크실패(RLF)', 'RLF RSRP threshold — sustained below this for T310 declares Radio Link Failure (RLF)', 'RLF RSRP门限 — 低于此值持续T310则判定无线链路失败(RLF)'],
   }
   const num = (label: string, key: keyof typeof mobility, min: number, max: number, step: number, unit: string) => (
     <label className="field" title={MOB_TIP[key as string] ? pick(lang, MOB_TIP[key as string][0], MOB_TIP[key as string][1], MOB_TIP[key as string][2]) : undefined}>
@@ -756,7 +834,7 @@ function MobilitySection() {
         {num('N310', 'n310', 1, 20, 1, '회')}
         {/* 통화드롭 RSRP — 라벨 바로 오른쪽에 입력 (PART 10) */}
         {num(pick(lang, '통화드롭', 'Call-drop', '掉话'), 'call_drop_rsrp_dbm', -140, -80, 1, 'dBm')}
-        <span className="mobility-filler" />
+        {num(pick(lang, 'RLF RSRP 기준', 'RLF RSRP threshold', 'RLF RSRP门限'), 'rlf_rsrp_dbm', -140, -80, 1, 'dBm')}
       </div>
       <button className="mobility-apply" onClick={bulkApplyMobility}
         title={pick(lang, '위 A3/CIO/TTT 값을 모든 RU에 한 번에 반영', 'Push the A3/CIO/TTT values above to every RU at once', '将上面的A3/CIO/TTT值一次性下发到所有RU')}>

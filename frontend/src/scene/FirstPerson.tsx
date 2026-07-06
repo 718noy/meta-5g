@@ -6,14 +6,17 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import * as api from '../api'
 import { buildAttachSteps, buildHandoverSteps } from '../attach'
-import { LOGT } from '../i18n'
+import { LOGT, pick } from '../i18n'
 import { useStore } from '../store'
 import type { SceneObject, Zone } from '../types'
 import {
   UPF_CAPACITY_PER_POD_MBPS,
   ZONES,
+  computeE2E,
   computeRoamingPath,
   defaultImsi,
+  ranChainOk,
+  ranChainText,
   suciOf,
   trafficInfo,
   zoneOffset,
@@ -100,6 +103,8 @@ export function FirstPerson() {
   const wasAgc = useRef(false)
   const wasRach = useRef(false)
   const wasCallDrop = useRef(false)
+  const wasRanFail = useRef(false) // 걷는 UE 서빙셀 RAN 경로 단절 상태 (전이 시에만 로깅)
+  const wasCoreFail = useRef(false) // 걷는 UE 존 코어(E2E) 미도달 상태 (전이 시에만 로깅)
   const velY = useRef(0)
   const grounded = useRef(true)
   // A3/A2/RLF 이동성 상태
@@ -267,7 +272,7 @@ export function FirstPerson() {
           const L = LOGT[st.lang]
 
           // A3 핸드오버 + CIO(셀별 오프셋) + A2 이벤트 + RLF(T310)
-          const { a3_offset_db, hysteresis_db, ttt_ms, a2_threshold_dbm, t310_ms } =
+          const { a3_offset_db, hysteresis_db, ttt_ms, a2_threshold_dbm, t310_ms, rlf_rsrp_dbm } =
             st.mobility
           // 셀별 CIO 반영된 유효 RSRP (셀 경계 조정)
           const cioOf = (id?: string) =>
@@ -293,8 +298,8 @@ export function FirstPerson() {
             }
           }
 
-          // RLF: 서빙 RSRP가 매우 낮게(-118 이하) T310 동안 지속 → Radio Link Failure → 재접속
-          if (cur && cur.rsrp_dbm < -118) {
+          // RLF: 서빙 RSRP가 매우 낮게(rlf_rsrp_dbm 이하) T310 동안 지속 → Radio Link Failure → 재접속
+          if (cur && cur.rsrp_dbm < rlf_rsrp_dbm) {
             const nowMs = performance.now()
             if (rlfSince.current === null) rlfSince.current = nowMs
             else if (nowMs - rlfSince.current >= t310_ms) {
@@ -358,6 +363,49 @@ export function FirstPerson() {
                 }
               : p,
           )
+          // 걷는 UE 서빙셀의 RAN 경로(RU→프론트홀→DU→F1→CU→N2 AMF & N3 UPF) 상시 감시.
+          // 사슬이 끊기면(장비 비활성/사이트다운 등) 활성 통화 드롭 + 트래픽 중단. 전이 시에만 로깅(4Hz 스팸 방지).
+          const servRu = st.objects.find((o) => o.kind === 'gnb' && o.id === servingId.current)
+          const ranChk = servRu
+            ? ranChainOk(servRu, st.objects, st.ranUnits, st.coreNfs, st.siteDown)
+            : null
+          if (servRu && ranChk && !ranChk.ok) {
+            if (!wasRanFail.current) {
+              wasRanFail.current = true
+              const imsi = defaultImsi(st.ueSim)
+              if (st.call && st.call.phase === 'active') st.endCall()
+              if (st.trafficActive) st.toggleTraffic()
+              st.addEvent('RU', 'error',
+                pick(st.lang,
+                  `UE: 트래픽/통화 중단 — ${ranChainText(ranChk.reason, 'ko')}`,
+                  `UE: traffic/call stopped — ${ranChainText(ranChk.reason, 'en')}`,
+                  `UE: 流量/通话中断 — ${ranChainText(ranChk.reason, 'zh')}`),
+                servRu.name, undefined, imsi)
+            }
+          } else if (servRu && ranChk && ranChk.ok) {
+            wasRanFail.current = false
+          }
+          // 코어 E2E(등록 AMF/AUSF/UDM + 세션 SMF/UPF + DN) 상시 감시 — RAN 사슬이 검증 못하는
+          // SMF/AUSF/UDM/DN 상실을 잡는다. 미도달이면 활성 통화 드롭 + 트래픽 중단. 전이 시에만 로깅.
+          if (curZone !== null) {
+            const e2e = computeE2E(st.objects, st.coreNfs, st.coreDn, curZone, st.siteDown, st.ranUnits)
+            if (!e2e.ok) {
+              if (!wasCoreFail.current) {
+                wasCoreFail.current = true
+                const imsi = defaultImsi(st.ueSim)
+                if (st.call && st.call.phase === 'active') st.endCall()
+                if (st.trafficActive) st.toggleTraffic()
+                st.addEvent('NF', 'error',
+                  pick(st.lang,
+                    `UE: 트래픽/통화 중단 — 코어 미도달(${e2e.missing.join(', ')})`,
+                    `UE: traffic/call stopped — core unreachable (${e2e.missing.join(', ')})`,
+                    `UE: 流量/通话中断 — 核心不可达(${e2e.missing.join(', ')})`),
+                  undefined, undefined, imsi)
+              }
+            } else {
+              wasCoreFail.current = false
+            }
+          }
           // PRACH 접속 성공률 (UL 커버리지) — 실패 시 재시도/접속불가 로그
           if (p.rach_ok === false && !wasRach.current) {
             wasRach.current = true

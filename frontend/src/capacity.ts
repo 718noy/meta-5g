@@ -14,8 +14,12 @@ import {
   NF_CAPACITY_PER_POD,
   ZONES,
   activeNf,
+  computeE2E,
+  defaultImsi,
   imsiRegistered,
   objZone,
+  ranChainOk,
+  ranChainText,
   trafficInfo,
 } from './types'
 
@@ -63,6 +67,17 @@ function personSinr(p: SceneObject, sim: SimResult | null): number | null {
   return Number.isFinite(s) ? s : null
 }
 
+// 시뮬 그리드에서 UE 위치의 RSRP(dBm) 샘플 — probe가 없는 배치 UE의 커버리지 판정용 (personSinr와 동일 인덱싱)
+function personRsrp(p: SceneObject, sim: SimResult | null): number | null {
+  if (!sim) return null
+  const [cx, cy, cz] = sim.cell
+  const ix = Math.min(Math.max(Math.floor(p.position[0] / cx), 0), sim.nx - 1)
+  const iy = Math.min(Math.max(Math.floor(1.5 / cy), 0), sim.ny - 1)
+  const iz = Math.min(Math.max(Math.floor(p.position[2] / cz), 0), sim.nz - 1)
+  const r = sim.rsrp[ix + iy * sim.nx + iz * sim.nx * sim.ny]
+  return Number.isFinite(r) ? r : null
+}
+
 // NB-IoT/LTE-M 커버리지 확장(CE) 사다리 — 클라이언트 근사(백엔드 physics._ce_ladder와 동형).
 // 수신 SNR이 CE0 동작점(-6dB) 아래로 떨어지면 반복(repetition)으로 링크를 확장.
 // 반복은 부족분(deficit=CE0−SNR)만큼 필요하며 3dB/2배 결합이득 근사. 부족분이 최대이득(20dB)
@@ -89,6 +104,7 @@ export function useCapacitySim() {
   const warned = useRef<Record<string, boolean>>({})
   const activeRef = useRef<Record<string, string | null>>({}) // (zone:type) → 활성 인스턴스 id (failover 감지)
   const nwdafTick = useRef(0) // SECTION B: NWDAF 주기 분석 로그 스로틀 (매 틱=1s, N틱마다 방출)
+  const droppedUes = useRef<Set<string>>(new Set()) // RSRP/RAN 경로 상실로 "드롭" 상태인 배치 UE id (전이 시에만 로깅)
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -302,6 +318,113 @@ export function useCapacitySim() {
               r.name)
           } else if (prbUtil <= 0.8) warned.current[`prb-${r.id}`] = false
         }
+      }
+      // ---- 배치 UE 무선구간 강제(추가 플로어): RAN 경로(RU→DU→CU→AMF/UPF) 사슬 + RSRP 커버리지 ----
+      // SINR≥-10 플로어·슬라이스·등록·admission 로직은 그대로 두고, 그 위에 얹는 추가 게이트.
+      // 좋은 곳→기준 미달 지역으로 이동하면 활성 통화/트래픽이 끊기도록 한다(걷는 UE는 FirstPerson에서 처리).
+      const dropThr = st.mobility.call_drop_rsrp_dbm
+      // Fix 3: 이번 틱에서 활성 통화는 최대 1회만 endCall (양쪽 party가 동시에 나빠질 때
+      //   두 번째 endCall이 Call Waiting으로 막 재개된 heldCall을 잘못 끊는 것을 방지).
+      let callDropped = false
+      // Fix 2: 통화 party로서 드롭된 UE는 personTraffic도 내려 "통화 없는데 트래픽 ON" stuck 방지.
+      //   순수 데이터 드롭은 personTraffic=true 유지(신호/코어 복귀 시 자동 재개).
+      const clearTraffic: string[] = []
+      // 활성 통화를 안전하게 드롭: 재판독해 여전히 이 UE의 통화일 때만, 틱당 1회. 드롭된 통화의 양쪽 party id 반환.
+      const dropActiveCall = (uid: string): string[] => {
+        if (callDropped) return []
+        const live = useStore.getState().call
+        if (live && (live.fromId === uid || live.toId === uid)) {
+          const parties = [live.fromId, live.toId]
+          st.endCall()
+          callDropped = true
+          return parties
+        }
+        return []
+      }
+      for (const ue of st.objects) {
+        if (ue.kind !== 'person') continue
+        const id = ue.id
+        const zone = objZone(ue)
+        const imsi = st.personImsi[id] ?? defaultImsi(st.ueSim)
+        // 서빙 RU: UE 존 내 켜진 최근접 gNB (셀 귀속 거리 로직과 동일)
+        let servingRu: SceneObject | undefined
+        let bd = Infinity
+        for (const r of st.objects) {
+          if (r.kind !== 'gnb' || objZone(r) !== zone || !r.gnb?.enabled) continue
+          const d = (r.position[0] - ue.position[0]) ** 2 + (r.position[2] - ue.position[2]) ** 2
+          if (d < bd) { bd = d; servingRu = r }
+        }
+        // RSRP: probe가 있으면 그 값, 없으면 존 sim RSRP 그리드에서 UE 위치 샘플
+        const rsrp = st.personProbes[id]?.rsrp_dbm ?? personRsrp(ue, st.sims[zone])
+        const chain = servingRu
+          ? ranChainOk(servingRu, st.objects, st.ranUnits, st.coreNfs, st.siteDown)
+          : { ok: false, reason: 'RU-off' as string }
+        // Fix 1: 코어 E2E(RU 사슬 + 등록 AMF/AUSF/UDM + 세션 SMF/UPF + DN) — RAN 사슬이 검증 못하는
+        //   SMF/AUSF/UDM/DN 상실을 잡는다. (레거시 존은 RU 통과 후 AMF/UPF 검사로 커버)
+        const e2e = computeE2E(st.objects, st.coreNfs, st.coreDn, zone, st.siteDown, st.ranUnits)
+        const inCall = st.call != null && (st.call.fromId === id || st.call.toId === id)
+        const trafficOn = (st.personTraffic[id] ?? false) && (st.personUeOn[id] ?? false)
+        // 트래픽도 없고 통화 party도 아니면 강제 대상 아님 — 드롭 상태만 정리(다음 활성 시 재로깅 허용)
+        if (!trafficOn && !inCall) { droppedUes.current.delete(id); continue }
+        const wasDropped = droppedUes.current.has(id)
+        const ranBroken = !servingRu || !chain.ok
+        const coreBroken = !e2e.ok
+        const rsrpLow = rsrp != null && rsrp < dropThr
+
+        if (ranBroken || coreBroken) {
+          // RAN 사슬 단절 또는 코어 미도달 → 무조건 트래픽 0 + 통화 드롭
+          personMbps[id] = 0
+          if (inCall) clearTraffic.push(...dropActiveCall(id))
+          if (!wasDropped) {
+            droppedUes.current.add(id)
+            st.addEvent(ranBroken ? 'RU' : 'NF', 'error',
+              pick(st.lang,
+                `${ue.name}: 트래픽 중단 — ${ranBroken ? ranChainText(chain.reason, 'ko') : `코어 미도달(${e2e.missing.join(', ')})`}`,
+                `${ue.name}: traffic stopped — ${ranBroken ? ranChainText(chain.reason, 'en') : `core unreachable (${e2e.missing.join(', ')})`}`,
+                `${ue.name}: 流量中断 — ${ranBroken ? ranChainText(chain.reason, 'zh') : `核心不可达(${e2e.missing.join(', ')})`}`),
+              ue.name, undefined, imsi)
+          }
+        } else if (rsrpLow) {
+          // 커버리지 이탈(RSRP < 기준) → 트래픽 0, 통화 드롭
+          personMbps[id] = 0
+          const r = Math.round(rsrp as number)
+          if (inCall) {
+            clearTraffic.push(...dropActiveCall(id))
+            if (!wasDropped) {
+              droppedUes.current.add(id)
+              st.addEvent('RU', 'error',
+                pick(st.lang,
+                  `${ue.name}: 콜 드롭 — RSRP ${r} < 기준 ${dropThr} (커버리지 이탈)`,
+                  `${ue.name}: call dropped — RSRP ${r} < threshold ${dropThr} (coverage loss)`,
+                  `${ue.name}: 掉话 — RSRP ${r} < 阈值 ${dropThr} (脱离覆盖)`),
+                ue.name, undefined, imsi)
+            }
+          } else if (trafficOn && !wasDropped) {
+            droppedUes.current.add(id)
+            st.addEvent('RU', 'error',
+              pick(st.lang,
+                `${ue.name}: 데이터 중단 — RSRP ${r} < 기준 ${dropThr}`,
+                `${ue.name}: data stopped — RSRP ${r} < threshold ${dropThr}`,
+                `${ue.name}: 数据中断 — RSRP ${r} < 阈值 ${dropThr}`),
+              ue.name, undefined, imsi)
+          }
+        } else if (wasDropped) {
+          // 회복: RAN 정상 + 코어 도달 + RSRP가 히스테리시스(기준+5dB) 이상으로 복귀 시 드롭 해제.
+          //   (이 분기는 !ranBroken && !coreBroken && !rsrpLow일 때만 도달 → ran/코어 모두 정상 보장)
+          if (rsrp == null || rsrp > dropThr + 5) droppedUes.current.delete(id)
+        }
+      }
+      // Fix 2: 통화 드롭된 party들의 personTraffic 해제 (배치 갱신 — 순수 데이터 드롭은 건드리지 않음)
+      if (clearTraffic.length > 0) {
+        useStore.setState((s) => {
+          const pt = { ...s.personTraffic }
+          for (const cid of clearTraffic) pt[cid] = false
+          return { personTraffic: pt }
+        })
+      }
+      // 제거된 UE는 드롭 집합에서 정리 (메모리 누수 방지)
+      for (const gone of [...droppedUes.current]) {
+        if (!st.objects.some((o) => o.id === gone)) droppedUes.current.delete(gone)
       }
       st.setPersonMbps(personMbps)
 

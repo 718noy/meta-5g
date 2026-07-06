@@ -1,8 +1,8 @@
 # ── 의존성 / 빌드 산출물 (생성물) ─────────────────────────
 node_modules/
 frontend/node_modules/
-frontend/dist/
-dist/
+# frontend/dist 는 일부러 커밋한다 — clone/다운로드 후 start.bat 만으로 8000에서 UI까지 바로 서빙(Node 불필요).
+# (프론트엔드 코드 변경 시 npm run build 로 재생성해 함께 커밋할 것.)
 dist_exe/
 build_exe_work/
 *.spec

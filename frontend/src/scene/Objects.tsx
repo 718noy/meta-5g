@@ -1,6 +1,7 @@
 // 배치된 오브젝트 렌더링 + 선택/이동·회전(TransformControls) + 키 조작
 //   G = 이동 기즈모, R = 회전 기즈모, Delete = 삭제, ESC = 선택 해제/배치 종료
 import { Edges, Html, TransformControls } from '@react-three/drei'
+import { useThree } from '@react-three/fiber'
 import type { ThreeEvent } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import type { Group } from 'three'
@@ -78,6 +79,7 @@ function Selectable({ obj }: { obj: SceneObject }) {
   const space = useStore((s) => s.space)
 
   const setDragging = useStore((s) => s.setDragging)
+  const controls = useThree((s) => s.controls)
   const selected = selectedId === obj.id || inMulti
   // 단일 선택일 때만 이동 기즈모 표시
   const soleSelected = selectedId === obj.id && multiCount <= 1
@@ -101,6 +103,10 @@ function Selectable({ obj }: { obj: SceneObject }) {
     e.stopPropagation()
     if (!inMulti) select(obj.id)
     setDragging({ id: obj.id, zone: objZone(obj) })
+    // OrbitControls의 enabled prop 반영은 1프레임 늦으므로(마퀴 수정과 동일 이슈),
+    // 드래그 시작 즉시 컨트롤 인스턴스를 동기적으로 잠가 카메라 회전을 원천 차단한다.
+    const c = controls as { enabled?: boolean } | null
+    if (c && typeof c.enabled === 'boolean') c.enabled = false
   }
 
   return (

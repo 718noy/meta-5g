@@ -489,14 +489,20 @@ export function computeE2E(
   coreDn: Record<Zone, boolean>,
   zone: Zone,
   siteDown: SiteDown = NO_SITE_DOWN,
+  ranUnits: RanUnit[] = [],
 ): { ok: boolean; missing: string[]; empty: boolean } {
   const objects = allObjects.filter((o) => objZone(o) === zone)
   const nfs = coreNfs.filter((n) => n.zone === zone)
   const missing: string[] = []
-  // RU: 송출 중 + (active 또는 안테나 연결된 passive)만 유효
+  // RU: 송출 중 + (active 또는 안테나 연결된 passive) + RU→DU→CU→AMF/UPF 사슬 성립
+  // (ranUnits가 [] 이거나 이 존에 RAN 유닛이 없으면 ranChainOk가 통과 → 레거시 동작 보존)
   if (
     !objects.some(
-      (o) => o.kind === 'gnb' && o.gnb?.enabled !== false && getRadiator(o, allObjects) !== null,
+      (o) =>
+        o.kind === 'gnb' &&
+        o.gnb?.enabled !== false &&
+        getRadiator(o, allObjects) !== null &&
+        ranChainOk(o, allObjects, ranUnits, coreNfs, siteDown).ok,
     )
   )
     missing.push('RU')
@@ -534,10 +540,11 @@ export function computeCall(
   fromZone: Zone,
   toZone: Zone,
   siteDown: SiteDown = NO_SITE_DOWN,
+  ranUnits: RanUnit[] = [],
 ): { ok: boolean; missing: string[]; interPlmn: boolean } {
   const missing: string[] = []
   for (const z of new Set([fromZone, toZone])) {
-    const e2e = computeE2E(allObjects, coreNfs, coreDn, z, siteDown)
+    const e2e = computeE2E(allObjects, coreNfs, coreDn, z, siteDown, ranUnits)
     if (!e2e.ok) missing.push(...e2e.missing.map((m) => `${m}(${z})`))
     const ims = computeIms(coreNfs, z, siteDown)
     if (!ims.ok) missing.push(...ims.missing.map((m) => `${m}(${z})`))
@@ -712,6 +719,57 @@ export interface RanUnit {
   cu_id?: string // (DU만) 소속 CU
   f1_latency_ms?: number // (DU) F1(CU-DU) 지연 ms
   max_cells?: number // (DU) 수용 셀(RU) 수 상한
+  amf_id?: string // (CU만) N2/NGAP 종단 AMF (CoreNf.id) — CU-CP↔AMF
+  upf_id?: string // (CU만) N3/GTP-U 종단 UPF (CoreNf.id) — CU-UP↔UPF
+}
+
+// RAN 경로 성립 판정: RU→(프론트홀)→DU→(F1)→CU→(N2)→AMF & CU→(N3)→UPF 사슬이 모두 가동해야 함.
+// 존에 RAN 유닛이 하나도 없으면 레거시/단순 모드로 간주해 통과(ok)시킨다(하위호환).
+export function ranChainOk(
+  ru: SceneObject, objects: SceneObject[], ranUnits: RanUnit[],
+  coreNfs: CoreNf[], siteDown: SiteDown = NO_SITE_DOWN,
+): { ok: boolean; reason: string } {
+  if (ru.kind !== 'gnb' || !ru.gnb) return { ok: false, reason: 'RU-off' }
+  if (ru.gnb.enabled === false) return { ok: false, reason: 'RU-off' }
+  if (!getRadiator(ru, objects)) return { ok: false, reason: 'no-antenna' }
+  const zone = objZone(ru)
+  const zoneRan = ranUnits.filter((u) => u.zone === zone)
+  if (zoneRan.length === 0) return { ok: true, reason: '' } // 레거시/단순 모드: 이 존에 RAN 유닛 미정의 → 통과
+  const du = ru.gnb.du_id ? ranUnits.find((u) => u.id === ru.gnb!.du_id && u.kind === 'du') : undefined
+  if (!ru.gnb.du_id) return { ok: false, reason: 'no-DU' }
+  if (!du) return { ok: false, reason: 'DU-missing' }
+  if (!du.enabled) return { ok: false, reason: 'DU-down' }
+  const cu = du.cu_id ? ranUnits.find((u) => u.id === du.cu_id && u.kind === 'cu') : undefined
+  if (!du.cu_id) return { ok: false, reason: 'no-CU' }
+  if (!cu) return { ok: false, reason: 'CU-missing' }
+  if (!cu.enabled) return { ok: false, reason: 'CU-down' }
+  const amf = cu.amf_id ? coreNfs.find((n) => n.id === cu.amf_id && n.nf_type === 'AMF' && nfUp(n, siteDown)) : undefined
+  if (!cu.amf_id) return { ok: false, reason: 'no-AMF' }
+  if (!amf) return { ok: false, reason: 'AMF-down' }
+  const upf = cu.upf_id ? coreNfs.find((n) => n.id === cu.upf_id && n.nf_type === 'UPF' && nfUp(n, siteDown)) : undefined
+  if (!cu.upf_id) return { ok: false, reason: 'no-UPF' }
+  if (!upf) return { ok: false, reason: 'UPF-down' }
+  return { ok: true, reason: '' }
+}
+
+// RAN 경로 실패 사유 → 3개국어 짧은 설명. reason 코드는 ranChainOk가 내보내는 것 전부 포함.
+export function ranChainText(reason: string, lang: 'ko' | 'en' | 'zh'): string {
+  const M: Record<string, [string, string, string]> = {
+    'RU-off': ['RU 미방사/비활성', 'RU not radiating / disabled', 'RU 未辐射/已禁用'],
+    'no-antenna': ['RU 미방사/비활성(안테나 없음)', 'RU not radiating (no antenna)', 'RU 未辐射(无天线)'],
+    'no-DU': ['RU가 DU에 미연결(프론트홀 없음)', 'RU not linked to a DU (no fronthaul)', 'RU未连接DU(无前传)'],
+    'DU-missing': ['소속 DU 없음(프론트홀 끊김)', 'Assigned DU missing (fronthaul broken)', '所属DU缺失(前传中断)'],
+    'DU-down': ['DU 비활성', 'DU disabled', 'DU 已禁用'],
+    'no-CU': ['DU가 CU에 미연결(F1 없음)', 'DU not linked to a CU (no F1)', 'DU未连接CU(无F1)'],
+    'CU-missing': ['소속 CU 없음(F1 끊김)', 'Assigned CU missing (F1 broken)', '所属CU缺失(F1中断)'],
+    'CU-down': ['CU 비활성', 'CU disabled', 'CU 已禁用'],
+    'no-AMF': ['CU가 AMF에 미연결(N2 없음)', 'CU not linked to an AMF (no N2)', 'CU未连接AMF(无N2)'],
+    'AMF-down': ['AMF 비활성/사이트다운', 'AMF disabled / site down', 'AMF 已禁用/站点故障'],
+    'no-UPF': ['CU가 UPF에 미연결(N3 없음)', 'CU not linked to a UPF (no N3)', 'CU未连接UPF(无N3)'],
+    'UPF-down': ['UPF 비활성/사이트다운', 'UPF disabled / site down', 'UPF 已禁用/站点故障'],
+  }
+  const e = M[reason] ?? ['RAN 경로 불량', 'RAN path broken', 'RAN 路径异常']
+  return lang === 'ko' ? e[0] : lang === 'zh' ? e[2] : e[1]
 }
 
 // RF 급전선 케이블 — 감쇠는 √f 스케일링 (기준: dB/100m @1GHz, 실측 스펙 기반)

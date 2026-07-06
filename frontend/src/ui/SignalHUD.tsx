@@ -6,6 +6,7 @@ import { rsrpColorCss } from '../colormap'
 import { pick, useT } from '../i18n'
 import { useStore } from '../store'
 import { computeE2E, computeRoamingPath, suciOf, supiOf } from '../types'
+import { WALK_UE } from './UeTracePanel'
 
 function bars(rsrp: number): number {
   if (rsrp >= -65) return 4
@@ -33,6 +34,8 @@ export function SignalHUD() {
   const ueSim = useStore((s) => s.ueSim)
   const setUeSim = useStore((s) => s.setUeSim)
   const setProcedureUe = useStore((s) => s.setProcedureUe)
+  const setTraceUe = useStore((s) => s.setTraceUe)
+  const bumpPanel = useStore((s) => s.bumpPanel)
   const lang = useStore((s) => s.lang)
   const homeZone = useStore((s) => s.homeZone)
   const [showSim, setShowSim] = useState(false)
@@ -154,6 +157,17 @@ export function SignalHUD() {
           🔗 {pick(lang, '절차 상세 (Call Flow)', 'Procedure (Call Flow)', '流程详情 (Call Flow)')}
         </button>
       )}
+
+      {/* 걷는 단말의 콜플로우 추적 — SIM(defaultImsi)으로 태그된 시그널링을 시간순 래더로 */}
+      <button
+        className="proc-btn"
+        onClick={() => { setTraceUe(WALK_UE); bumpPanel('uetrace') }}
+        title={pick(lang,
+          '걷는 단말(이 SIM)이 유발한 시그널링(등록·이동성·핸드오버·서비스요청·통화)을 시간순으로 보기',
+          "See the walking UE's signaling (attach, mobility, handover, service request, call) time-ordered",
+          '按时间顺序查看行走终端(此SIM)引发的信令(注册·移动性·切换·业务请求·通话)')}>
+        🪜 {pick(lang, '콜플로우 추적 (Walk UE)', 'Call-flow trace (Walk UE)', '呼叫流程追踪 (行走终端)')}
+      </button>
 
       {/* 서비스모드 (*#0011# 스타일) — 실제 RAN 파라미터가 그대로 표시됨 */}
       {ueOn && probe && rsrp != null && (

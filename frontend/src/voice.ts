@@ -117,10 +117,19 @@ export function useCallEngine() {
       return
     }
 
+    // 이 통화가 여전히 스토어에 살아있고 동일한 통화(같은 발신/착신)인지 확인.
+    // capacity/FirstPerson이 RSRP·RAN 경로 상실로 endCall() 했으면(=null 또는 다른 통화로 교체)
+    // in-flight 타이머가 죽은 통화를 되살리지 않도록 이후 단계 진행/로그를 중단한다.
+    const sameCall = () => {
+      const c = useStore.getState().call
+      return !!c && c.fromId === call.fromId && c.toId === call.toId
+    }
+
     const seq = inviteFlow(call.interPlmn)
     let delay = STEP
     seq.forEach((step) => {
       const t = window.setTimeout(() => {
+        if (!sameCall()) return
         useStore.getState().addEvent(step.src, 'info', step.msg, step.node, undefined, imsi, step.from, step.to)
       }, delay)
       timers.current.push(t)
@@ -128,7 +137,10 @@ export function useCallEngine() {
     })
 
     // ringing 상태
-    const tRing = window.setTimeout(() => useStore.getState().setCallPhase('ringing'), delay)
+    const tRing = window.setTimeout(() => {
+      if (!sameCall()) return
+      useStore.getState().setCallPhase('ringing')
+    }, delay)
     timers.current.push(tRing)
     delay += STEP * 2 // 벨 울리는 시간
 

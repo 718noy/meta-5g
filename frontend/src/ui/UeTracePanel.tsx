@@ -10,6 +10,10 @@ import { frontRef } from './zorder'
 import type { LogEvent } from '../store'
 import { defaultImsi, objZone } from '../types'
 
+// 걷기(WALK) 단말은 배치된 person 객체가 아니라 SIM(ueSim) 자체로 식별된다.
+// traceUe === WALK_UE 일 때 imsi 를 defaultImsi(ueSim) 로 해석해 걷는 단말의 트레이스를 보여준다.
+export const WALK_UE = '__walk__'
+
 type PhaseKey =
   | 'reg' | 'pdu' | 'sr' | 'ho' | 'paging' | 'dereg' | 'pos' | 'ims' | 'other'
 
@@ -110,14 +114,19 @@ export function UeTracePanel() {
 
   const persons = objects.filter((o) => o.kind === 'person')
 
-  // 추적 대상: traceUe → (선택된 person) → 첫 person
+  // 걷기 단말 추적 모드 — traceUe 가 WALK 센티넬이면 person 이 아니라 SIM 으로 필터.
+  const isWalk = traceUe === WALK_UE
+
+  // 추적 대상: (걷기 단말) → traceUe → (선택된 person) → 첫 person
   const activeId =
-    (traceUe && persons.some((p) => p.id === traceUe) && traceUe) ||
-    (selectedId && persons.some((p) => p.id === selectedId) && selectedId) ||
-    persons[0]?.id ||
+    (!isWalk && traceUe && persons.some((p) => p.id === traceUe) && traceUe) ||
+    (!isWalk && selectedId && persons.some((p) => p.id === selectedId) && selectedId) ||
+    (!isWalk && persons[0]?.id) ||
     null
   const activeObj = persons.find((p) => p.id === activeId) ?? null
-  const imsi = activeObj ? (personImsi[activeObj.id] ?? defaultImsi(ueSim)) : null
+  const imsi = isWalk
+    ? defaultImsi(ueSim)
+    : activeObj ? (personImsi[activeObj.id] ?? defaultImsi(ueSim)) : null
 
   // 이 UE(IMSI)의 이벤트만, 삽입(시간) 순서 그대로.
   const traced = useMemo(
@@ -163,10 +172,15 @@ export function UeTracePanel() {
         {persons.length > 0 && (
           <select
             className="node-filter"
-            value={activeId ?? ''}
+            value={isWalk ? WALK_UE : (activeId ?? '')}
             title={pick(lang, '추적할 측정요원(UE) 선택 — 이 UE의 시그널링만 표시', 'Pick which test UE to trace — shows only its signaling', '选择要追踪的测试人员(UE) — 仅显示该UE的信令')}
             onChange={(e) => setTraceUe(e.target.value)}
           >
+            {isWalk && (
+              <option value={WALK_UE}>
+                {pick(lang, '🚶 걷기 단말 (Walk UE)', '🚶 Walk UE', '🚶 行走终端')}
+              </option>
+            )}
             {persons.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name} · PLMN-{objZone(p)}
@@ -186,6 +200,11 @@ export function UeTracePanel() {
 
       {imsi && (
         <div className="uetrace-sub">
+          {isWalk && (
+            <span className="uetrace-chip" title={pick(lang, '걷기(1인칭) 모드에서 열림 — SIM으로 식별되는 걷는 단말', 'Opened from walk (first-person) mode — the walking UE identified by SIM', '从行走(第一人称)模式打开 — 由SIM标识的行走终端')}>
+              🚶 {pick(lang, '걷기 단말 (Walk UE)', 'Walk UE', '行走终端')}
+            </span>
+          )}
           <span className="log-imsi" title="IMSI">SIM {imsi}</span>
           <span className="uetrace-count">
             {traced.length} {pick(lang, '메시지', 'messages', '消息')}
