@@ -1,5 +1,6 @@
 // 시나리오 재현·검증 패널 — 실제 5G use case(성공/실패)를 한 클릭으로 씬에 적용하고,
 // 시뮬레이터가 내는 결과가 기대 결과와 맞는지(재현 성공 여부) 실시간 판정.
+import { useState } from 'react'
 import { pick } from '../i18n'
 import { useStore } from '../store'
 import { frontRef } from './zorder'
@@ -17,6 +18,7 @@ export function ScenarioPanel() {
   const homeZone = useStore((s) => s.homeZone)
   const ko = lang === 'ko'
   const { dragStyle, headerProps } = usePanelDrag()
+  const [notice, setNotice] = useState<string | null>(null)
 
   if (!show) return null
 
@@ -36,6 +38,12 @@ export function ScenarioPanel() {
           '应用真实 5G use case(成功/失败呼叫流程),并确认仿真复现结果。',
         )}
       </div>
+      {notice && (
+        <div className="scenario-notice" style={{ padding: '8px 10px', margin: '6px 8px', borderRadius: 6, background: 'rgba(255,120,80,0.15)', border: '1px solid rgba(255,120,80,0.55)', fontSize: '0.88em', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ flex: 1, whiteSpace: 'pre-wrap', lineHeight: 1.4 }}>{notice}</span>
+          <button className="log-btn" onClick={() => setNotice(null)} title={pick(lang, '닫기', 'Dismiss', '关闭')} style={{ flexShrink: 0 }}>✕</button>
+        </div>
+      )}
       <div className="scenario-list">
         {SCENARIOS.map((sc) => {
           const res = sc.expect({ objects, coreNfs, coreDn, homeZone })
@@ -72,7 +80,11 @@ export function ScenarioPanel() {
                   : pick(lang, '이 시나리오대로 씬을 새로 구성해 재현·검증 (기존 배치 초기화)', 'Rebuild the scene per this scenario to reproduce & verify (clears current setup)', '按此场景重建场景以复现·验证 (清除当前布置)')}
                 onClick={() => {
                   if (descriptive) {
-                    // 설명용 시나리오 — 씬 변경 없이 스토어 게이트가 안내 로그만 남긴다.
+                    // 설명용 시나리오 — 씬 변경 없이, 패널에 바로 보이는 안내 배너 + 로그.
+                    setNotice(pick(lang,
+                      `🚫 "${sc.ko}" — 현 시점에서 실제 시뮬레이션 불가 (설명용). 씬/로그 변경 없음.\n예상 절차: ${sc.cause ?? sc.desc_ko ?? ''}`,
+                      `🚫 "${sc.en}" — not simulable in the current engine yet (descriptive only). No scene/log change.\nExpected: ${sc.cause ?? sc.desc_en ?? ''}`,
+                      `🚫 "${sc.zh}" — 当前引擎尚无法实际仿真 (仅说明)。无场景/日志变更。\n预期: ${sc.cause ?? sc.desc_zh ?? ''}`))
                     applyScenario(sc.id)
                     return
                   }

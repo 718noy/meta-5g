@@ -1040,7 +1040,8 @@ function RanRuRow({ ru }: { ru: SceneObject }) {
   const linkedDu = dus.find((d) => d.id === g.du_id)
   return (
     <div className={`nf-row ${g.enabled ? '' : 'off'}`}>
-      <div className="nf-row-head">
+      <div className="nf-row-head" onClick={() => setOpen(!open)} style={{ cursor: 'pointer' }}
+        title={pick(lang, '클릭하여 이 RU의 무선 파라미터 펼치기/접기', 'Click to expand/collapse this RU’s radio params', '点击展开/收起此RU的无线参数')}>
         <span
           className="nf-dot"
           title={g.enabled ? pick(lang, '전파 송출 중', 'Transmitting', '正在发射') : pick(lang, '전파 정지', 'TX off', '停止发射')}
@@ -1066,13 +1067,9 @@ function RanRuRow({ ru }: { ru: SceneObject }) {
             <option key={d.id} value={d.id}>{d.name}</option>
           ))}
         </select>
-        <button
-          className="log-btn"
-          title={pick(lang, '이 RU의 전체 무선 파라미터 펼치기/접기 (주파수·출력·안테나·이동성…)', 'Expand/collapse this RU’s full radio params (freq/power/antenna/mobility…)', '展开/收起此RU的全部无线参数 (频率·功率·天线·移动性…)')}
-          onClick={() => setOpen((o) => !o)}
-        >
-          {open ? '▾ ⚙' : '▸ ⚙'}
-        </button>
+        <span className="nf-meta" style={{ marginLeft: 'auto', fontSize: 12, opacity: 0.7 }}>
+          {open ? '▾' : '▸'}
+        </span>
       </div>
       {open && (
         <div className="nf-row-body">
