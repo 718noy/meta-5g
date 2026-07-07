@@ -662,7 +662,7 @@ export function useCapacitySim() {
         for (const slice of st.slices) {
           if (slice.zone !== zone) continue
           const nsac = slice.nsac_max_ues
-          if (nsac == null) continue
+          if (nsac == null || nsac <= 0) continue // 0/미지정 = 무제한 (NSAC 미설정)
           const sliceUes = st.objects.filter((o) => {
             if (o.kind !== 'person' || objZone(o) !== zone) return false
             if (!st.personTraffic[o.id] || !st.personUeOn[o.id]) return false

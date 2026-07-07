@@ -1,7 +1,7 @@
 // 실제 5G use case(콜플로우/실패 사례) 프리셋 — 실무·3GPP TS 24.501 cause 기반.
 // 각 시나리오는 씬/파라미터를 설정하고, 시뮬레이터가 재현하는 결과가 "기대 결과"와
 // 맞는지 검증(pass/fail)한다. 성공 케이스와 실패 케이스를 모두 수집.
-import type { CoreNf, GnbParams, NfParams, NfType, SceneObject, Slice, Zone } from './types'
+import type { CoreNf, GnbParams, NfParams, NfType, SceneObject, Slice, SuppServices, Zone } from './types'
 import { computeCall, computeE2E, computeIms, computeRoamingPath } from './types'
 
 export interface ScenarioResult {
@@ -22,6 +22,22 @@ export interface Scenario {
   domain?: string // 도메인 분류 (registration/auth/pdu/ran/vonr/roaming/scale/userplane/charging/iot/snpn/multirat)
   validated?: boolean // 실제 Open5GS/UERANSIM 스택으로 ground-truth 검증됨
   simulable?: boolean // true = Apply가 실제 상태에서 결과를 냄; 미지정/false = 현재 엔진에서 시뮬 불가(설명용) → Apply는 메시지만, 씬 변경 없음
+  // Apply 후 생성 UE의 트래픽을 실제로 ON → capacity-tick 게이트(#26/#59/#69/AMBR)를 발동.
+  startTraffic?: boolean
+  // Apply 후 생성 UE 2명 간 실제 VoNR(IMS SIP) 통화를 발신 → voice.ts/startCall이 SIP/MMTEL 플로우 방출.
+  autoCall?: boolean
+  // autoCall 상세 (발신/착신 UE, 발신/착신 MMTEL 부가서비스, 착신전환 대상, 통화중 유발용 선행통화).
+  call?: {
+    fromName?: string // 발신 UE 이름 (기본: 첫 생성 UE)
+    toName?: string // 착신 UE 이름 (기본: 둘째 생성 UE)
+    callerSupp?: Partial<SuppServices> // 발신측 TAS 설정 (예: ocb/oir)
+    calleeSupp?: Partial<SuppServices> // 착신측 TAS 설정 (예: icb/cfu/cfb/cfnr/cfnrc/cw)
+    cfTargetName?: string // 착신전환 대상 UE 이름 → 착신측 supp.cfTarget에 주입
+    preCallFromName?: string // 선행 통화 발신 UE (착신자를 통화중으로 만들기 위함)
+    preCallToName?: string // 선행 통화 착신 UE (보통 본 통화의 착신자)
+  }
+  // SBA-strict: NRF가 없으면 NF discovery 실패로 등록 중단 (nrf-spof).
+  nrfRequired?: boolean
   category: 'success' | 'failure'
   // 기대 결과 판정 (현재 씬 상태로부터)
   expect: (ctx: {
@@ -41,13 +57,13 @@ export type SetupOp =
   | { op: 'disableNf'; zone: Zone; type: NfType }
   | { op: 'setDn'; zone: Zone; on: boolean }
   | { op: 'ensureRU'; zone: Zone }
-  | { op: 'ensurePerson'; zone: Zone; name: string; register?: boolean } // register:false → IMSI 미프로비저닝(Illegal UE #3)
+  | { op: 'ensurePerson'; zone: Zone; name: string; register?: boolean; barred?: boolean } // register:false → IMSI 미프로비저닝(Illegal UE #3); barred:true → UAC/Access-class 접속 차단
   | { op: 'addSlice'; zone: Zone; sst: number; sd: string } // PART 3: 슬라이스 프로비저닝
   | { op: 'note'; text: string }
   // ── REAL-condition ops (측정 UE 대량 배치 / NF·셀·슬라이스 파라미터 실설정) ──
   // 존에 count명의 측정 UE 배치(실제 대량 부하/혼잡). register 기본 true(각 IMSI를 UDM/UDR에 프로비저닝);
   // register:false면 IMSI 프로비저닝 없이 배치.
-  | { op: 'ensurePersons'; zone: Zone; count: number; register?: boolean }
+  | { op: 'ensurePersons'; zone: Zone; count: number; register?: boolean; barred?: boolean }
   // 해당 존의 NF 인스턴스에 파라미터 설정(예: max_registered_ue, capacity_per_pod, auth_fail_mode,
   // sepp_n32_secure, chf_quota_mb, max_pdu_sessions). NF가 없으면 DEFAULT_NF로 생성 후 patch 병합.
   | { op: 'nfParam'; zone: Zone; nf: NfType; patch: Partial<NfParams> }
@@ -185,12 +201,15 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'No SEPP → N32 interconnect/security fails → roaming auth fails.',
     desc_zh: '拜访/归属网络无 SEPP → N32 互联/安全(PRINS)不可用 → 漫游鉴权失败。(现网:SEPP 证书与 NRF federation 是漫游失败前两大原因)',
     ref: 'TS 33.501 §13 SEPP · N32 · IPX. Field: SEPP cert & NRF federation = top-2 roaming failures',
-    cause: 'N32 interconnect failure — registration via VPLMN aborted (transient)', domain: 'roaming', category: 'failure',
+    cause: 'N32 interconnect failure — registration via VPLMN aborted (transient)', domain: 'roaming', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'B' },
       { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'SMF' },
-      { op: 'ensureNf', zone: 'B', type: 'UPF' },
-      { op: 'removeNf', zone: 'B', type: 'SEPP' }, { op: 'removeNf', zone: 'A', type: 'SEPP' },
+      { op: 'ensureNf', zone: 'B', type: 'UPF' }, { op: 'ensureNf', zone: 'B', type: 'SEPP' },
+      // SEPP는 존재하되 N32 handshake/cert 무효 → 방문 UE attach 시 N32-c 실패 → 홈 PLMN 도달불가(일시적 중단).
+      { op: 'nfParam', zone: 'B', nf: 'SEPP', patch: { sepp_n32_secure: false } },
+      { op: 'ensurePerson', zone: 'B', name: 'UE-B1' },
+      { op: 'note', text: '방문 UE-B1 attach → SEPP N32-c handshake 실패 → home PLMN 도달불가 → 등록 일시 중단(transient, 재시도)' },
     ],
     expect: (c) => {
       const p = computeRoamingPath(c.objects, c.coreNfs, c.coreDn, 'B', c.homeZone === 'B' ? 'A' : c.homeZone)
@@ -207,7 +226,8 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'E2E data + IMS → SIP register/INVITE → VoNR call (5QI=1 GBR).',
     desc_zh: 'E2E 数据 + IMS(P/I/S-CSCF) → SIP 注册·INVITE → VoNR 通话 (5QI=1 GBR, DNN=ims)。',
     ref: 'TS 23.228 IMS · TS 24.229 SIP · TS 23.501 5QI=1 GBR voice',
-    category: 'success',
+    category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2' },
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
@@ -239,12 +259,16 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'Data OK but no IMS(S-CSCF) → no SIP response → 503/408, no call.',
     desc_zh: '数据可用但无 IMS(S-CSCF) → SIP REGISTER/INVITE 无响应 → 503 Service Unavailable/408 Timeout,无法通话。',
     ref: 'TS 24.229 SIP · RFC 3261 (503 Service Unavailable / 408 Timeout)',
-    category: 'failure',
+    category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2' },
     setup: [
       { op: 'ensureRU', zone: 'A' },
-      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
       { op: 'removeNf', zone: 'A', type: 'S-CSCF' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
     ],
     expect: (c) => {
       const ims = computeIms(c.coreNfs, 'A')
@@ -385,13 +409,16 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'NWDAF reads existing nfLoads/per-zone traffic, emits "NF X load N%, slice load…" analytics → recommendation → PCF/AMF/HPA actuation (closed loop). Above 80% the HPA scale-out fires, labelled as the NWDAF-driven closed loop.',
     desc_zh: 'NWDAF 读取现有 nfLoads/分区流量,输出 "NF X 负载 N%、切片负载…" 分析 → 建议 → PCF/AMF/HPA 执行(闭环)。超过 80% 时 HPA 扩容触发,标注为 NWDAF 驱动的闭环。',
     ref: 'TS 23.288 §6.5 NF load analytics · TS 23.501 §5.19 (auto-scaling/overload) · Nnwdaf_AnalyticsSubscription (NF_LOAD)',
-    domain: 'scale', category: 'success',
+    domain: 'scale', category: 'success', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'ensureNf', zone: 'A', type: 'NWDAF' }, { op: 'ensureNf', zone: 'A', type: 'PCF' },
-      { op: 'note', text: 'AMF/UPF 파드당 용량을 낮추고 측정요원 다수 배치 후 전체 트래픽 → NWDAF 부하분석 로그 + HPA 폐루프 스케일아웃 관측.' },
+      // AMF 1파드(용량 10,000) + 배후 부하 8,500 → 85% > HPA 80% → auto_scale 스케일아웃.
+      // NWDAF 존재 → 폐루프(Nnwdaf_AnalyticsSubscription NF_LOAD → 권고 → HPA 실행) 로그 방출.
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, background_load_ue: 8500, auto_scale: true } },
+      { op: 'note', text: 'AMF 부하 85% → NWDAF 부하분석(NF_LOAD) → SCALE-OUT 권고 → HPA 폐루프 스케일아웃 로그' },
     ],
     expect: () => ({
       label_ko: 'NWDAF 부하분석 → 권고 → HPA 폐루프 스케일아웃 로그 확인',
@@ -511,10 +538,17 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'Requested NSSAI 전부 미허용/미가입 → NSSF가 Allowed NSSAI 산출 실패 → Registration Reject 5GMM #62 No network slices available.',
     desc_en: 'All requested NSSAI rejected → NSSF cannot derive Allowed NSSAI → Registration Reject 5GMM #62 No network slices available.',
     desc_zh: '所有请求的 NSSAI 均不允许 → NSSF 无法生成 Allowed NSSAI → Registration Reject 5GMM #62 无可用网络切片。',
-    ref: 'TS 24.501 §5.5.1 · TS 23.501 §5.15 · 5GMM #62', cause: '5GMM #62', domain: 'registration', category: 'failure',
+    ref: 'TS 24.501 §5.5.1 · TS 23.501 §5.15 · 5GMM #62', cause: '5GMM #62', domain: 'registration', category: 'failure', simulable: true,
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'NSSF' },
-      { op: 'note', text: 'UE가 미가입 S-NSSAI만 요청 → Allowed NSSAI 공집합 → #62' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'NSSF' },
+      // NSSF max_allowed_nssai=0 → Allowed-NSSAI가 공집합으로 클램프 → Registration Reject #62.
+      { op: 'nfParam', zone: 'A', nf: 'NSSF', patch: { max_allowed_nssai: 0 } },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' },
+      { op: 'note', text: 'NSSF max_allowed_nssai=0 → Allowed-NSSAI 공집합 → Registration Reject 5GMM #62' },
     ],
     expect: () => ({ label_ko: 'Registration Reject #62 — No network slices available', label_en: 'Registration Reject #62 — No slices' }),
   },
@@ -798,7 +832,7 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'NSAC — 슬라이스당 최대 PDU 세션 초과 → SMF→NSACF 증가요청 거부 → 5GSM #69 + T3585 back-off.',
     desc_en: 'NSAC — max PDU sessions per slice exceeded → NSACF admission reject → 5GSM #69 + T3585 back-off.',
     desc_zh: 'NSAC — 每切片最大 PDU 会话数超限 → NSACF 准入拒绝 → 5GSM #69 + T3585 退避。',
-    ref: 'TS 23.501 §5.36 NSAC · 5GSM #69 · T3585', cause: '5GSM #69 + T3585', domain: 'pdu', category: 'failure',
+    ref: 'TS 23.501 §5.36 NSAC · 5GSM #69 · T3585', cause: '5GSM #69 + T3585', domain: 'pdu', category: 'failure', simulable: true, startTraffic: true,
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
@@ -807,6 +841,7 @@ export const SCENARIOS: Scenario[] = [
       { op: 'setDn', zone: 'A', on: true },
       { op: 'sliceParam', zone: 'A', sst: 1, patch: { nsac_max_ues: 2 } },
       { op: 'ensurePersons', zone: 'A', count: 4 },
+      { op: 'note', text: '트래픽 시작 시 슬라이스 NSAC 한도 2 초과 → 초과 UE PDU 세션 거부 5GSM #69 + T3585' },
     ],
     expect: () => ({ label_ko: 'PDU Reject #69 — slice resources (NSAC, T3585)', label_en: 'PDU Reject #69 — slice resources (NSAC)' }),
   },
@@ -816,7 +851,7 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '슬라이스 allowed_5qi=[1,2](GBR만) + 기본 데이터 UE(5QI 9) → 요청 5QI가 슬라이스 허용집합 밖 → 5GSM #59 Unsupported 5QI value.',
     desc_en: 'Slice allowed_5qi=[1,2] (GBR only) + default data UE (5QI 9) → requested 5QI outside the slice allowed set → 5GSM #59 Unsupported 5QI value.',
     desc_zh: '切片 allowed_5qi=[1,2](仅 GBR) + 默认数据 UE(5QI 9) → 请求的 5QI 不在切片允许集 → 5GSM #59 Unsupported 5QI value。',
-    ref: 'TS 24.501 §6.4.2 · TS 23.501 §5.7 · 5GSM #59', cause: '5GSM #59', domain: 'pdu', category: 'failure',
+    ref: 'TS 24.501 §6.4.2 · TS 23.501 §5.7 · 5GSM #59', cause: '5GSM #59', domain: 'pdu', category: 'failure', simulable: true, startTraffic: true,
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
@@ -825,7 +860,7 @@ export const SCENARIOS: Scenario[] = [
       { op: 'setDn', zone: 'A', on: true },
       { op: 'sliceParam', zone: 'A', sst: 1, patch: { allowed_5qi: [1, 2] } },
       { op: 'ensurePersons', zone: 'A', count: 1 },
-      { op: 'note', text: '기본 데이터 트래픽(5QI 9)은 슬라이스 허용집합 [1,2] 밖 → 트래픽 생성 시 #59로 세션 거부' },
+      { op: 'note', text: '기본 트래픽(5QI 8, video)이 슬라이스 허용집합 [1,2] 밖 → 트래픽 시작 시 5GSM #59 Unsupported 5QI value로 세션 거부' },
     ],
     expect: () => ({ label_ko: 'QoS Reject #59 — Unsupported 5QI value', label_en: 'QoS Reject #59 — Unsupported 5QI' }),
   },
@@ -922,11 +957,14 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '데이터는 되나 P-CSCF 없음 → PCO로 P-CSCF 주소 미획득 → SIP REGISTER 진입점 없음 → IMS 등록 실패.',
     desc_en: 'Data OK but no P-CSCF → no P-CSCF address via PCO → no SIP entry point → IMS registration fails.',
     desc_zh: '数据可用但无 P-CSCF → 无法通过 PCO 获取 P-CSCF 地址 → 无 SIP 入口 → IMS 注册失败。',
-    ref: 'TS 23.228 · TS 24.229 · P-CSCF discovery (PCO)', cause: 'IMS reg fail (no P-CSCF)', domain: 'vonr', category: 'failure',
+    ref: 'TS 23.228 · TS 24.229 · P-CSCF discovery (PCO)', cause: 'IMS reg fail (no P-CSCF)', domain: 'vonr', category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'removeNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
     ],
     expect: (c) => {
       const ims = computeIms(c.coreNfs, 'A')
@@ -941,11 +979,14 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'I-CSCF 없음 → S-CSCF 조회/할당(HSS Cx) 불가 → REGISTER 라우팅 실패 → IMS 등록/통화 불가.',
     desc_en: 'No I-CSCF → cannot query/assign S-CSCF (HSS Cx) → REGISTER routing fails → no IMS registration/call.',
     desc_zh: '无 I-CSCF → 无法查询/分配 S-CSCF(HSS Cx) → REGISTER 路由失败 → 无 IMS 注册/通话。',
-    ref: 'TS 23.228 · TS 24.229 · Cx (I-CSCF↔HSS)', cause: 'IMS reg fail (no I-CSCF)', domain: 'vonr', category: 'failure',
+    ref: 'TS 23.228 · TS 24.229 · Cx (I-CSCF↔HSS)', cause: 'IMS reg fail (no I-CSCF)', domain: 'vonr', category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'removeNf', zone: 'A', type: 'I-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
     ],
     expect: (c) => {
       const ims = computeIms(c.coreNfs, 'A')
@@ -1016,7 +1057,8 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'A·B 양측 완전 코어+IMS(P/I/S-CSCF)+SEPP(IPX SIP 트렁크) → 국가 간 VoNR 통화 성립.',
     desc_en: 'Both A/B full core+IMS+SEPP (IPX SIP trunk) → inter-PLMN VoNR call OK.',
     desc_zh: '双侧 A/B 完整核心网+IMS+SEPP(IPX SIP 干线) → 跨 PLMN VoNR 通话建立。',
-    ref: 'TS 23.228 · GSMA IR.65/AA.80 (IPX) · SEPP N32', domain: 'vonr', category: 'success',
+    ref: 'TS 23.228 · GSMA IR.65/AA.80 (IPX) · SEPP N32', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-B1' },
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
       { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
@@ -1039,7 +1081,8 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '양측 코어+IMS 완비하나 SEPP 없음 → IPX SIP 트렁크(N32 근사) 불가 → 국가 간 통화 라우팅 실패.',
     desc_en: 'Both cores+IMS ready but no SEPP → no IPX SIP trunk (N32 proxy) → inter-PLMN call routing fails.',
     desc_zh: '双侧核心网+IMS 就绪但无 SEPP → 无 IPX SIP 干线(N32 近似) → 跨 PLMN 通话路由失败。',
-    ref: 'TS 33.501 §13 SEPP/N32 · GSMA IPX SIP trunk', cause: 'No IPX/SEPP trunk', domain: 'vonr', category: 'failure',
+    ref: 'TS 33.501 §13 SEPP/N32 · GSMA IPX SIP trunk', cause: 'No IPX/SEPP trunk', domain: 'vonr', category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-B1' },
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
       { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
@@ -1047,6 +1090,7 @@ export const SCENARIOS: Scenario[] = [
       { op: 'ensureRU', zone: 'B' }, { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'AUSF' }, { op: 'ensureNf', zone: 'B', type: 'UDM' },
       { op: 'ensureNf', zone: 'B', type: 'SMF' }, { op: 'ensureNf', zone: 'B', type: 'UPF' }, { op: 'setDn', zone: 'B', on: true },
       { op: 'ensureNf', zone: 'B', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'I-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'S-CSCF' }, { op: 'removeNf', zone: 'B', type: 'SEPP' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'B', name: 'UE-B1' },
     ],
     expect: (c) => {
       const call = computeCall(c.objects, c.coreNfs, c.coreDn, 'A', 'B')
@@ -1175,11 +1219,15 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'NRF 다운 → NF discovery/registration 불가 → 신규 NF 선택·failover 마비(SCP와 함께 SBA SPOF). 기존 세션은 잔존.',
     desc_en: 'NRF down → NF discovery/registration fails → new NF selection/failover paralyzed (SBA SPOF with SCP).',
     desc_zh: 'NRF 宕机 → NF 发现/注册失败 → 新 NF 选择/failover 瘫痪(与 SCP 同为 SBA 单点)。',
-    ref: 'TS 29.510 NRF · TS 23.501 §6.2.6 · SBA SPOF', cause: 'NRF SPOF (discovery fail)', domain: 'scale', category: 'failure',
+    ref: 'TS 29.510 NRF · TS 23.501 §6.2.6 · SBA SPOF', cause: 'NRF SPOF (discovery fail)', domain: 'scale', category: 'failure', simulable: true, nrfRequired: true,
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'removeNf', zone: 'A', type: 'NRF' },
-      { op: 'note', text: 'NRF 없음 → 신규 NF discovery/failover 불가(SBA SPOF)' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' },
+      { op: 'note', text: 'SBA-strict: NRF 부재 → AUSF/UDM/SMF discovery 불가 → Registration 중단(신규 NF 선택/failover 마비)' },
     ],
     expect: () => ({ label_ko: 'NRF SPOF — NF discovery/failover 불가', label_en: 'NRF SPOF — discovery/failover down' }),
   },
@@ -1715,10 +1763,10 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'Xn 미구성(양측 xn 없음) → NGAP 경로 핸드오버: Handover Required → AMF → Handover Request/Ack → Handover Command → Handover Notify(간접 포워딩).',
     desc_en: 'No Xn between gNBs → NGAP-based handover: Handover Required → AMF → Handover Request/Ack → Handover Command → Handover Notify (indirect forwarding).',
     desc_zh: '基站间无 Xn → 基于 NGAP 的切换:Handover Required → AMF → Handover Request/Ack → Handover Command → Handover Notify(间接转发)。',
-    ref: 'TS 23.502 §4.9.1.3 (N2 handover)', cause: 'N2 handover (no Xn)', domain: 'ran', category: 'success',
+    ref: 'TS 23.502 §4.9.1.3 (N2 handover)', cause: 'N2 handover (no Xn)', domain: 'ran', category: 'success', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'RU 2대 배치, 걷기 모드로 셀 경계 이동 → NGAP 핸드오버 call flow 로그' },
+      { op: 'note', text: 'attach 후 N2(NGAP) inter-gNB 핸드오버 call-flow(buildHandoverSteps xn=false)를 자동 스트리밍' },
     ],
     expect: () => ({ label_ko: 'N2(NGAP) 핸드오버 성공 (Xn 없음)', label_en: 'N2 (NGAP) handover OK (no Xn)' }),
   },
@@ -2064,10 +2112,10 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '같은 AMF + Xn 연결 가정 → 소스↔타겟 gNB 간 Xn Handover Request/Ack, SN Status Transfer(PDCP SN/HFN), reconfigWithSync, 이후 Path Switch Request→AMF→UPF(N3 경로 갱신)+End Marker. N2(AMF 중계) 핸드오버보다 지연 낮음.',
     desc_en: 'Same AMF + Xn assumed → Xn Handover Request/Ack directly between source/target gNB, SN Status Transfer (PDCP SN/HFN), reconfigWithSync, then Path Switch Request → AMF → UPF (N3 path update) + End Marker. Lower latency than N2 (AMF-relayed) HO.',
     desc_zh: '同 AMF + Xn → 源/目标 gNB 间直接 Xn Handover Request/Ack、SN Status Transfer、reconfigWithSync,随后 Path Switch → AMF → UPF + End Marker。比 N2 切换时延更低。',
-    ref: 'TS 38.423 §8.2 (XnAP HO) · TS 23.502 §4.9.1.2 (Xn handover)', cause: 'Xn handover (Path Switch)', domain: 'ran', category: 'success',
+    ref: 'TS 38.423 §8.2 (XnAP HO) · TS 23.502 §4.9.1.2 (Xn handover)', cause: 'Xn handover (Path Switch)', domain: 'ran', category: 'success', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'RU 2대(Xn 연결 가정) 배치, 걷기 모드로 셀 경계 이동 → Xn handover call flow(buildHandoverSteps xn=true)' },
+      { op: 'note', text: 'attach 후 Xn 직접 핸드오버 call-flow(buildHandoverSteps xn=true, Path Switch로 N3 갱신)를 자동 스트리밍' },
     ],
     expect: () => ({ label_ko: 'Xn 핸드오버 성공 (Path Switch로 N3 경로 갱신)', label_en: 'Xn handover OK (Path Switch updates N3)' }),
   },
@@ -2104,7 +2152,7 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '이미 RM-REGISTERED인 UE가 CM-IDLE에서 상향 데이터 발생 → NAS Service Request → InitialContextSetup → DRB 재수립으로 CM-CONNECTED. full re-attach가 아니라 사용자평면만 재활성. (측정요원 전원 ON 후 트래픽 시작 시 자동 방출)',
     desc_en: 'A RM-REGISTERED UE with uplink data in CM-IDLE → NAS Service Request → InitialContextSetup → DRB re-establish → CM-CONNECTED. User plane re-activated without full re-attach. (Emitted automatically when a test UE that is powered ON starts traffic.)',
     desc_zh: '已 RM-REGISTERED 的 UE 在 CM-IDLE 有上行数据 → NAS Service Request → InitialContextSetup → DRB 重建 → CM-CONNECTED。仅重新激活用户面。',
-    ref: 'TS 23.502 §4.2.3.2 (UE-triggered Service Request)', cause: 'Service Request (CM-IDLE→CONNECTED)', domain: 'registration', category: 'success',
+    ref: 'TS 23.502 §4.2.3.2 (UE-triggered Service Request)', cause: 'Service Request (CM-IDLE→CONNECTED)', domain: 'registration', category: 'success', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'note', text: '측정요원 전원 ON 상태에서 트래픽 시작 → Service Request 로그(buildServiceRequestSteps) 자동 방출' },
@@ -2117,7 +2165,7 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '측정요원 전원 OFF → Deregistration Request(switch-off) → AMF가 PDU 세션 해제(Nsmf_PDUSession_ReleaseSMContext→N4 Delete) + UEContextRelease → RM-DEREGISTERED. switch-off라 Dereg Accept 없음. (전원 OFF 시 자동 방출)',
     desc_en: 'Test UE powered OFF → Deregistration Request (switch-off) → AMF releases PDU sessions (ReleaseSMContext→N4 Delete) + UEContextRelease → RM-DEREGISTERED. No Dereg Accept for switch-off. (Emitted automatically on power OFF.)',
     desc_zh: '测试 UE 关机 → Deregistration Request(switch-off)→ AMF 释放 PDU 会话 + UEContextRelease → RM-DEREGISTERED。关机不回 Accept。',
-    ref: 'TS 23.502 §4.2.2.3.2 (UE-initiated deregistration)', cause: 'UE-init deregistration (switch-off)', domain: 'registration', category: 'success',
+    ref: 'TS 23.502 §4.2.2.3.2 (UE-initiated deregistration)', cause: 'UE-init deregistration (switch-off)', domain: 'registration', category: 'success', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'note', text: '측정요원을 전원 OFF 하면 Deregistration(switch-off) 로그(buildDeregisterSteps)가 방출됨' },
@@ -2130,7 +2178,7 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '망 정책 변경/가입 갱신 → AMF가 Deregistration Request(de-registration type: re-registration-required) → UE가 Dereg Accept 후 즉시 초기 등록 재수행. UE 개시 switch-off와 구분되는 NW-init 절차.',
     desc_en: 'Policy change/subscription update → AMF sends Deregistration Request (type: re-registration-required) → UE sends Dereg Accept and immediately re-registers (initial). NW-initiated, distinct from UE switch-off.',
     desc_zh: '策略变更/签约更新 → AMF 发送 Deregistration Request(要求重注册)→ UE 回 Accept 后立即重新注册。',
-    ref: 'TS 23.502 §4.2.2.3.3 (network-initiated deregistration)', cause: 'NW-init deregistration (re-registration required)', domain: 'registration', category: 'failure',
+    ref: 'TS 23.502 §4.2.2.3.3 (network-initiated deregistration)', cause: 'NW-init deregistration (re-registration required)', domain: 'registration', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
       { op: 'note', text: '망 정책 변경 시 AMF가 re-registration-required Deregistration → UE 재등록(buildDeregisterSteps nwInit=true)' },
@@ -2184,11 +2232,16 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '특정 DNN 혼잡 제어 → 5GSM #26 Insufficient resources + Back-off timer(T3396) IE → 만료 전 동일 DNN 재시도 금지.',
     desc_en: 'Per-DNN congestion control → 5GSM #26 Insufficient resources + Back-off timer (T3396) IE → no retry to same DNN until expiry.',
     desc_zh: '针对 DNN 的拥塞控制 → 5GSM #26 资源不足 + Back-off 定时器(T3396) → 到期前禁止对同一 DNN 重试。',
-    ref: 'TS 24.501 §6.4.1 · §6.2.8 (T3396) · 5GSM #26', cause: '5GSM #26 + T3396', domain: 'pdu', category: 'failure',
+    ref: 'TS 24.501 §6.4.1 · §6.2.8 (T3396) · 5GSM #26', cause: '5GSM #26 + T3396', domain: 'pdu', category: 'failure', simulable: true, startTraffic: true,
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
-      { op: 'ensureNf', zone: 'A', type: 'UPF' },
-      { op: 'note', text: '특정 DNN 혼잡 → #26 + T3396 back-off (만료 전 동일 DNN 재시도 금지)' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      // SMF max_pdu_sessions=2 → 4명 트래픽 시작 시 초과분 2명이 5GSM #26 + T3396 back-off.
+      { op: 'nfParam', zone: 'A', nf: 'SMF', patch: { max_pdu_sessions: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 4 },
+      { op: 'note', text: 'SMF 세션 한도 2 초과 → 초과 UE PDU 세션 거부 5GSM #26 Insufficient resources + T3396 back-off' },
     ],
     expect: () => ({ label_ko: 'PDU Reject #26 — DNN 혼잡, T3396 back-off', label_en: 'PDU Reject #26 — DNN congestion, T3396 back-off' }),
   },
@@ -2616,10 +2669,11 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '서빙 RSRP가 디코드 임계 미달 → SIB1(kSSB 범위 밖) 미획득 → 셀을 barred로 취급, 최대 300s 배제.',
     desc_en: 'Serving RSRP below decode threshold → SIB1 not acquired (kSSB out of range) → cell treated as barred, excluded up to 300s.',
     desc_zh: '服务 RSRP 低于解码门限 → SIB1(kSSB 越界)未获取 → 小区视为 barred,最长排除 300s。',
-    ref: 'TS 38.331 §5.2.2 · TS 38.304 §5.2.3 (SIB1 not acquired → barred)', cause: 'SIB1 not acquired → cell barred (300s)', domain: 'ran', category: 'failure',
+    ref: 'TS 38.331 §5.2.2 · TS 38.304 §5.2.3 (SIB1 not acquired → barred)', cause: 'SIB1 not acquired → cell barred (300s)', domain: 'ran', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: '서빙 RSRP 매우 낮음 → SIB1 미획득 → barred 300s' },
+      { op: 'ruParam', zone: 'A', patch: { cell_barred: true } },
+      { op: 'note', text: 'SIB1 획득 실패 → 셀을 barred로 취급 → 캠핑 불가, 무서비스(RRC_IDLE)' },
     ],
     expect: () => ({ label_ko: 'SIB1 미획득 → cell barred(300s)', label_en: 'SIB1 not acquired → cell barred (300s)' }),
   },
@@ -2629,10 +2683,11 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'SIB1 cellReservedForOperatorUse → HPLMN AC11-15 UE만 캠핑, 일반/로머는 barred로 취급.',
     desc_en: 'SIB1 cellReservedForOperatorUse → only HPLMN AC11-15 UEs camp; ordinary/roamer UEs treat the cell as barred.',
     desc_zh: 'SIB1 cellReservedForOperatorUse → 仅 HPLMN AC11-15 UE 驻留;普通/漫游 UE 视为 barred。',
-    ref: 'TS 38.304 §5.2.3 (cellReservedForOperatorUse)', cause: 'cellReservedForOperatorUse', domain: 'ran', category: 'failure',
+    ref: 'TS 38.304 §5.2.3 (cellReservedForOperatorUse)', cause: 'cellReservedForOperatorUse', domain: 'ran', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'SIB1 cellReservedForOperatorUse → 일반 UE barred' },
+      { op: 'ruParam', zone: 'A', patch: { cell_barred: true } },
+      { op: 'note', text: 'SIB1 cellReservedForOperatorUse → 일반 UE는 셀을 barred로 취급 → 캠핑 불가(무서비스)' },
     ],
     expect: () => ({ label_ko: 'cellReservedForOperatorUse → 일반 UE barred', label_en: 'cellReservedForOperatorUse → ordinary UE barred' }),
   },
@@ -3891,10 +3946,11 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'SIB1에 halfDuplexRedCapAllowed-r17 부재 → HD-FDD RedCap UE 접속 불가(cell barred for HD-FDD RedCap).',
     desc_en: 'halfDuplexRedCapAllowed-r17 absent in SIB1 → HD-FDD RedCap UE cannot access (cell barred for HD-FDD RedCap).',
     desc_zh: 'SIB1 无 halfDuplexRedCapAllowed-r17 → HD-FDD RedCap UE 无法接入(对 HD-FDD RedCap barred)。',
-    ref: 'TS 38.331 SIB1 (halfDuplexRedCapAllowed-r17)', cause: 'halfDuplexRedCapAllowed-r17 absent', domain: 'iot', category: 'failure',
+    ref: 'TS 38.331 SIB1 (halfDuplexRedCapAllowed-r17)', cause: 'halfDuplexRedCapAllowed-r17 absent', domain: 'iot', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'SIB1 halfDuplexRedCapAllowed 부재 → HD-FDD RedCap barred' },
+      { op: 'ruParam', zone: 'A', patch: { cell_barred: true } },
+      { op: 'note', text: 'SIB1 halfDuplexRedCapAllowed-r17 부재 → HD-FDD RedCap UE는 셀을 barred로 취급 → 접속 불가' },
     ],
     expect: () => ({ label_ko: 'HD-FDD RedCap barred (halfDuplex 미허용)', label_en: 'HD-FDD RedCap barred (halfDuplex not allowed)' }),
   },
@@ -3982,10 +4038,11 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'SIB14 EAB로 AC 0-9 barred → 지연허용(delay-tolerant) MTC 단말 접속 차단.',
     desc_en: 'SIB14 EAB bars AC 0-9 → delay-tolerant MTC UEs are access-barred.',
     desc_zh: 'SIB14 EAB 阻断 AC 0-9 → 延迟容忍 MTC UE 接入被阻。',
-    ref: 'TS 36.331 SIB14 (EAB)', cause: 'EAB (SIB14) — delay-tolerant barred', domain: 'iot', category: 'failure',
+    ref: 'TS 36.331 SIB14 (EAB) · TS 22.261 UAC (5G 대응)', cause: 'EAB/UAC — delay-tolerant barred', domain: 'iot', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'SIB14 EAB AC 0-9 barred → delay-tolerant MTC 차단' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1', barred: true },
+      { op: 'note', text: 'EAB(지연허용 접속 차단, 5G에선 UAC로 대응) → delay-tolerant MTC 단말 접속 차단(RRCSetup 이전)' },
     ],
     expect: () => ({ label_ko: 'EAB → delay-tolerant 접속 차단', label_en: 'EAB → delay-tolerant access barred' }),
   },
@@ -3995,10 +4052,11 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: 'mIoT 슬라이스 MO data(Access Category 7/3) → UAC barring → RRCSetupRequest 이전 차단(T390 기동).',
     desc_en: 'mIoT slice MO data (Access Category 7/3) → UAC barring → barred before RRCSetupRequest (T390 started).',
     desc_zh: 'mIoT 切片 MO data(Access Category 7/3)→ UAC 阻断 → RRCSetupRequest 前被阻(启动 T390)。',
-    ref: 'TS 22.261/TS 38.331 (UAC) · T390', cause: 'UAC access category 7 barred (T390)', domain: 'iot', category: 'failure',
+    ref: 'TS 22.261/TS 38.331 (UAC) · T390', cause: 'UAC access category 7 barred (T390)', domain: 'iot', category: 'failure', simulable: true,
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'UAC AC7 barring factor → RRCSetup 이전 차단, T390' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1', barred: true },
+      { op: 'note', text: 'UAC AC7 barring → SIB1 uac-BarringInfo가 RRCSetupRequest 이전 접속 시도를 차단(T390)' },
     ],
     expect: () => ({ label_ko: 'UAC AC7 차단 (T390 기동)', label_en: 'UAC AC7 barred (T390 started)' }),
   },
@@ -4982,10 +5040,18 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 CFU 설정 → IMS-AS(TAS): CDIV CFU → 181 Call Is Being Forwarded → 전환 대상에 INVITE.',
     desc_en: 'Callee has CFU → IMS-AS(TAS): CDIV CFU → 181 Call Is Being Forwarded → INVITE to forward target.',
     desc_zh: '被叫设置 CFU → IMS-AS(TAS):CDIV CFU → 181 Call Is Being Forwarded → 向前转目标 INVITE。',
-    ref: 'TS 24.604 (CDIV CFU)', cause: 'CDIV CFU (181 → forward)', domain: 'vonr', category: 'success',
+    ref: 'TS 24.604 (CDIV CFU)', cause: 'CDIV CFU (302 → forward)', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2', calleeSupp: { cfu: true }, cfTargetName: 'UE-A3' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: 'TAS CFU → 181 → 전환 대상 INVITE' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A3' },
+      { op: 'note', text: '착신 UE-A2 CFU(무조건 착신전환) → SIP 302 → 전환 대상 UE-A3에 INVITE (실제 발신)' },
     ],
     expect: () => ({ label_ko: 'CFU → 181 → 전환 성공', label_en: 'CFU → 181 → forwarded' }),
   },
@@ -4995,10 +5061,18 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 무응답(no-reply timer, 기본 20s) → CFNRy timer 만료 → 181 → CDIV 전환.',
     desc_en: 'Callee no answer (no-reply timer, default 20s) → CFNRy timer expiry → 181 → CDIV forward.',
     desc_zh: '被叫无应答(no-reply 定时器,默认 20s)→ CFNRy 到期 → 181 → CDIV 前转。',
-    ref: 'TS 24.604 (CDIV CFNRy)', cause: 'CDIV CFNRy (timer → forward)', domain: 'vonr', category: 'success',
+    ref: 'TS 24.604 (CDIV CFNRy)', cause: 'CDIV CFNRy (no-reply timer → 302 forward)', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2', calleeSupp: { cfnr: true }, cfTargetName: 'UE-A3' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '무응답 → CFNRy timer 만료 → 181 → 전환' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A3' },
+      { op: 'note', text: '착신 UE-A2 무응답 → No-Reply timer 만료 → CFNRy → SIP 302 → UE-A3 전환' },
     ],
     expect: () => ({ label_ko: 'CFNRy 타이머 → 181 → 전환', label_en: 'CFNRy timer → 181 → forward' }),
   },
@@ -5008,10 +5082,18 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 통화중(NDUB) → 486 Busy Here → CFB 설정 시 TAS: CDIV CFB → 181 → 전환.',
     desc_en: 'Callee busy (NDUB) → 486 Busy Here → if CFB configured, TAS: CDIV CFB → 181 → forward.',
     desc_zh: '被叫忙(NDUB)→ 486 Busy Here → 若配置 CFB,TAS:CDIV CFB → 181 → 前转。',
-    ref: 'TS 24.604 (CDIV CFB, NDUB)', cause: 'CDIV CFB (486 → forward)', domain: 'vonr', category: 'success',
+    ref: 'TS 24.604 (CDIV CFB, NDUB)', cause: 'CDIV CFB (486 busy → 302 forward)', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2', calleeSupp: { cfb: true }, cfTargetName: 'UE-A4', preCallFromName: 'UE-A3', preCallToName: 'UE-A2' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '착신 통화중 → 486 → CFB → 181 → 전환' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A3' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A4' },
+      { op: 'note', text: 'UE-A3↔UE-A2 통화중 → UE-A1이 UE-A2 발신 → 486 Busy → CFB → SIP 302 → UE-A4 전환' },
     ],
     expect: () => ({ label_ko: 'CFB (486 NDUB) → 전환', label_en: 'CFB (486 NDUB) → forward' }),
   },
@@ -5021,10 +5103,26 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 도달불가(E2E 실패/무선 상실) → 480 → CFNRc 설정 시 TAS: CDIV CFNRc → 181 → 전환.',
     desc_en: 'Callee not reachable (E2E fail/out of coverage) → 480 → if CFNRc configured, TAS: CDIV CFNRc → 181 → forward.',
     desc_zh: '被叫不可达(E2E 失败/失去覆盖)→ 480 → 若配置 CFNRc,TAS:CDIV CFNRc → 181 → 前转。',
-    ref: 'TS 24.604 (CDIV CFNRc)', cause: 'CDIV CFNRc (480 → forward)', domain: 'vonr', category: 'success',
+    ref: 'TS 24.604 (CDIV CFNRc)', cause: 'CDIV CFNRc (480 → 302 forward)', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-B1', calleeSupp: { cfnrc: true }, cfTargetName: 'UE-A2' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '착신 도달불가 → 480 → CFNRc → 181 → 전환' },
+      // 발신 A(완전 코어+IMS+SEPP+DN) + 전환대상 UE-A2(도달가능).
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensureNf', zone: 'A', type: 'SEPP' },
+      // 착신 UE-B1: IMS는 있으나 세션(SMF/UPF/DN) 부재 → E2E 도달불가 → 480 Temporarily Unavailable.
+      { op: 'ensureRU', zone: 'B' },
+      { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'B', type: 'UDM' },
+      { op: 'ensureNf', zone: 'B', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'B', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'SEPP' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'ensurePerson', zone: 'B', name: 'UE-B1' },
+      { op: 'note', text: '착신 UE-B1 도달불가(세션 부재) → 480 → CFNRc → SIP 302 → UE-A2 전환(실제 발신 성립)' },
     ],
     expect: () => ({ label_ko: 'CFNRc (480) → 전환', label_en: 'CFNRc (480) → forward' }),
   },
@@ -5060,10 +5158,18 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 통화중 + CW 활성 → 180 Ringing + Alert-Info(call waiting tone), 통화중 UE에 대기호 표시.',
     desc_en: 'Callee busy + CW enabled → 180 Ringing + Alert-Info (call waiting tone), waiting-call indication to the busy UE.',
     desc_zh: '被叫忙 + CW 启用 → 180 Ringing + Alert-Info(呼叫等待音),向忙碌 UE 显示等待呼叫。',
-    ref: 'TS 24.615 (Communication Waiting)', cause: 'Call Waiting (180 + Alert-Info)', domain: 'vonr', category: 'success',
+    ref: 'TS 24.615 (Communication Waiting)', cause: 'Call Waiting (180 + hold)', domain: 'vonr', category: 'success', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2', calleeSupp: { cw: true }, preCallFromName: 'UE-A3', preCallToName: 'UE-A2' },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '착신 통화중 + CW → 180 + Alert-Info 대기호' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A3' },
+      { op: 'note', text: 'UE-A3↔UE-A2 통화중 + UE-A2 CW → UE-A1 발신 시 180 Ringing + 기존 통화 보류(re-INVITE sendonly)' },
     ],
     expect: () => ({ label_ko: 'Call Waiting 표시 (180+Alert-Info)', label_en: 'Call Waiting indication (180+Alert-Info)' }),
   },
@@ -5086,10 +5192,17 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '착신자 ICB rule 매치(예: 국제 차단) → TAS: ICB → 603 Decline(벨 울리기 전).',
     desc_en: 'Callee ICB rule match (e.g. bar international) → TAS: ICB → 603 Decline (before ringing).',
     desc_zh: '被叫 ICB 规则匹配(如阻挡国际)→ TAS:ICB → 603 Decline(振铃前)。',
-    ref: 'TS 24.611 (ICB)', cause: 'ICB → 603 Decline', domain: 'vonr', category: 'failure',
+    ref: 'TS 24.611 (ICB)', cause: 'ICB → 603 Decline', domain: 'vonr', category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-A2', calleeSupp: { icb: true } },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '착신 ICB rule 매치 → 603 Decline' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'A', name: 'UE-A2' },
+      { op: 'note', text: '착신 UE-A2 ICB 활성 → 착신측 TAS가 SIP 603 Decline(벨 울리기 전) 반환' },
     ],
     expect: () => ({ label_ko: 'ICB → 603 Decline', label_en: 'ICB → 603 Decline' }),
   },
@@ -5099,10 +5212,24 @@ export const SCENARIOS: Scenario[] = [
     desc_ko: '발신자 OCB(international) + interPlmn → 발신 S-CSCF에서 SEPP/IPX leg 이전 TAS: OCB → 603 Decline.',
     desc_en: 'Caller OCB (international) + interPlmn → TAS: OCB → 603 Decline at originating S-CSCF, before the SEPP/IPX leg.',
     desc_zh: '主叫 OCB(international)+ interPlmn → 在主叫 S-CSCF、SEPP/IPX 分支之前 TAS:OCB → 603 Decline。',
-    ref: 'TS 24.611 (OCB)', cause: 'OCB international → 603 Decline', domain: 'vonr', category: 'failure',
+    ref: 'TS 24.611 (OCB)', cause: 'OCB international → 603 Decline', domain: 'vonr', category: 'failure', simulable: true, autoCall: true,
+    call: { fromName: 'UE-A1', toName: 'UE-B1', callerSupp: { ocb: true } },
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' },
-      { op: 'note', text: '발신 OCB(international) → 603 Decline' },
+      // 발신 A(완전 코어+IMS+SEPP) + 착신 B(다른 PLMN) → interPlmn 국제발신.
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'IMS-AS' }, { op: 'ensureNf', zone: 'A', type: 'SEPP' },
+      { op: 'ensureRU', zone: 'B' },
+      { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'B', type: 'UDM' }, { op: 'ensureNf', zone: 'B', type: 'SMF' },
+      { op: 'ensureNf', zone: 'B', type: 'UPF' }, { op: 'setDn', zone: 'B', on: true },
+      { op: 'ensureNf', zone: 'B', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'I-CSCF' },
+      { op: 'ensureNf', zone: 'B', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'B', type: 'SEPP' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' }, { op: 'ensurePerson', zone: 'B', name: 'UE-B1' },
+      { op: 'note', text: '발신 UE-A1 OCB(국제발신 차단) → 발신측 S-CSCF에서 SEPP/IPX 이전 SIP 603 Decline' },
     ],
     expect: () => ({ label_ko: 'OCB 국제발신 → 603 Decline', label_en: 'OCB international → 603 Decline' }),
   },

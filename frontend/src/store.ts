@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { buildAttachSteps, buildDeregisterSteps, buildGutiReallocSteps, buildMroFailureSteps, buildPagingSteps, buildPositioningSteps, buildRerouteSteps, buildRnauSteps, buildServiceRequestSteps, endpoints } from './attach'
+import { buildAttachSteps, buildDeregisterSteps, buildGutiReallocSteps, buildHandoverSteps, buildMroFailureSteps, buildPagingSteps, buildPositioningSteps, buildRerouteSteps, buildRnauSteps, buildServiceRequestSteps, endpoints } from './attach'
 import type { AttachStep, MroType, PosMethod } from './attach'
 import { LOGT, pick } from './i18n'
 import { SCENARIOS } from './scenarios'
@@ -79,7 +79,13 @@ const nextPersonImsi = (sim: UeSim): string => imsiWithMsin(sim, personImsiSeq++
 const FLOW_BUILDER_SCENARIOS = new Set<string>([
   'mt-paging-ddn', 'reg-mico-unreachable', 'rnau-inactive', 'guti-reallocation',
   'reg-reroute-nas', 'mro-too-late', 'mro-too-early', 'mro-wrong-cell',
+  // 핸드오버(N2/Xn) + 등록/세션 전이 call-flow — 각 전용 빌더를 attach 이후 스트리밍.
+  'ho-ngap-n2', 'ho-xn', 'dereg-ue-switchoff', 'dereg-nw-reregister', 'sr-idle-to-connected',
 ])
+
+// nrf-spof처럼 도메인이 'roaming'이 아니어도 attach를 돌려야 하는 것과 반대로, 도메인이 'roaming'이지만
+// 예외적으로 관측 UE를 자동 attach 시켜야 하는 시나리오(방문존 N32 분기 발동). applyScenario의 attach 제외 우회.
+const ATTACH_ROAMING_ALLOW = new Set<string>(['roaming-fail-sepp'])
 
 // SECTION A: 배치형 UE의 현재 서빙 RU/코어 NF를 해석해 call-flow 빌더용 FlowCtx 생성.
 // togglePersonUe(attach)와 동일한 선택 로직(최근접 RU + NRF 기반 activeNf)을 재사용.
@@ -221,6 +227,7 @@ interface State {
   personBarred: Record<string, boolean> // 접속 차단(Access barring, UAC) — 전원 ON/트래픽 시도 차단
   personSupp: Record<string, SuppServices> // UE별 MMTEL 부가서비스(TAS) 토글
   registeredImsis: string[] // PART 13: Core(UDM/UDR)에 프로비저닝된 IMSI 레지스트리
+  nrfStrict: boolean // SBA-strict: NRF가 없으면 NF discovery 실패로 등록 중단 (nrf-spof 시나리오에서만 true)
   trafficType: TrafficType // 전역 기본 트래픽 종류 (per-person 미지정 시)
   // VoNR 통화 (IMS SIP)
   call: CallState | null
@@ -566,6 +573,7 @@ export const useStore = create<State>((set, get) => ({
   personBarred: {},
   personSupp: {},
   registeredImsis: [defaultImsi(DEFAULT_UE_SIM)],
+  nrfStrict: false,
   personMbps: {},
   trafficType: 'video',
   call: null,
@@ -1504,7 +1512,7 @@ export const useStore = create<State>((set, get) => ({
       ueName: obj.name, servingName: serving, pci: servPci,
       plmn: `${s0.ueSim.mcc}/${s0.ueSim.mnc}`, tac: '1', ueIp,
       amf: nf('AMF'), ausf: nf('AUSF'), udm: nf('UDM'), smf: nf('SMF'), upf: nf('UPF'),
-      nrf: nf('NRF'), nssf: nf('NSSF'), pcf: nf('PCF'), udr: nf('UDR'), chf: nf('CHF'), bsf: nf('BSF'),
+      nrf: nf('NRF'), nrfRequired: s0.nrfStrict, nssf: nf('NSSF'), pcf: nf('PCF'), udr: nf('UDR'), chf: nf('CHF'), bsf: nf('BSF'),
       dn: s0.coreDn[zone], zone, imsiRegistered: imsiRegistered(imsi, s0.ueSim, s0.registeredImsis),
       requestedSst, allowedSst: allowed, sliceSst: allowed.includes(ti.sst) ? ti.sst : allowed[0],
       cellBarred, rsrpDbm, qRxLevMinDbm, amfCongested, amfRegCount, amfMaxUe, t3346Min, t3512Min,
@@ -2137,7 +2145,7 @@ export const useStore = create<State>((set, get) => ({
       personBarred: {}, personSupp: {},
       // BUG6: 누락돼 있던 런타임 UE 맵도 함께 초기화 (registeredImsis가 리셋마다 무한 증가하던 문제 포함).
       personUeOn: {}, personTrafficType: {}, personImsi: {}, personCallee: {},
-      registeredImsis: [defaultImsi(get().ueSim)],
+      registeredImsis: [defaultImsi(get().ueSim)], nrfStrict: false,
       viewNonce: get().viewNonce + 1, // 카메라 시점도 초기화
       gotoZoneReq: null,
     })
@@ -2174,7 +2182,7 @@ export const useStore = create<State>((set, get) => ({
         personImsi,
         personUeOn: {}, personTraffic: {}, personMbps: {}, personProbes: {},
         personTrafficType: {}, personBarred: {}, personSupp: {}, personCallee: {},
-        registeredImsis: [...new Set([defaultImsi(sim), ...newImsis])],
+        registeredImsis: [...new Set([defaultImsi(sim), ...newImsis])], nrfStrict: false,
       })
       get().addEvent('SIM', 'info',
         pick(get().lang, '구성 불러오기 완료', 'Configuration loaded', '配置加载完成'))
@@ -2250,9 +2258,11 @@ export const useStore = create<State>((set, get) => ({
     set({
       personTraffic: {}, personMbps: {}, personProbes: {},
       personUeOn: {}, personTrafficType: {}, personImsi: {},
-      personBarred: {}, personSupp: {},
+      personBarred: {}, personSupp: {}, personCallee: {},
       call: null, heldCall: null, selectedId: null, procedureUe: null,
     })
+    // UAC/Access-class barred로 배치되는 UE(pid) — togglePersonUe에서 접속 차단 abort가 실제로 발동.
+    const scenarioBarred: Record<string, boolean> = {}
 
     const nfExists = (zone: Zone, type: NfType) =>
       coreNfs.some((n) => n.zone === zone && n.nf_type === type)
@@ -2327,12 +2337,14 @@ export const useStore = create<State>((set, get) => ({
         zonesUsed.add(op.zone)
         const pid = addPerson(op.zone, op.name)
         if (pid && op.register === false) unregisteredPersons.add(pid)
+        if (pid && op.barred === true) scenarioBarred[pid] = true
       } else if (op.op === 'ensurePersons') {
         // 존에 count명의 측정 UE를 실제로 배치 (대량 부하/혼잡을 실제 상태로 재현).
         zonesUsed.add(op.zone)
         for (let i = 0; i < op.count; i++) {
           const pid = addPerson(op.zone, `UE-${op.zone}m-${idCounter}`)
           if (pid && op.register === false) unregisteredPersons.add(pid)
+          if (pid && op.barred === true) scenarioBarred[pid] = true
         }
       } else if (op.op === 'nfParam') {
         // 존의 NF에 파라미터 실설정 (없으면 생성 후 patch 병합) → 실제 admission 게이트가 결과를 만든다.
@@ -2390,7 +2402,12 @@ export const useStore = create<State>((set, get) => ({
       .map((pid) => scenarioImsi[pid])
     set({
       objects, coreNfs, coreDn, slices, personUeOn: {},
-      personImsi: scenarioImsi,
+      // 시나리오는 단순 RU-only RAN(gnb에 du_id 없음)을 만든다 → 이전 씬의 CU/DU 논리유닛을 비워
+      // ranChainOk가 레거시 통과하도록(안 그러면 트래픽/통화가 no-DU로 막힘). 결과 관측을 위해 필수.
+      ranUnits: [],
+      personImsi: scenarioImsi, personBarred: scenarioBarred, personCallee: {},
+      // nrf-spof: NRF 필수 배포로 표시 → togglePersonUe attach가 NRF 부재 시 discovery-fail 중단.
+      nrfStrict: sc.nrfRequired === true,
       registeredImsis: [defaultImsi(sim0), ...registeredScenarioImsis],
     })
     get().addEvent(
@@ -2403,13 +2420,47 @@ export const useStore = create<State>((set, get) => ({
     // BUG1c: 로밍 시나리오는 관측 UE를 자동 전원 ON/attach 하지 않는다. 방문존에는 AUSF/UDM이
     // 없어(홈 인증) buildAttachSteps가 auth-reject를 방출하며 "성공" 라벨과 모순되기 때문. 결과는
     // 시나리오 note + 로밍 경로 패널로 안내한다.
-    if (sc.domain !== 'roaming') {
+    if (sc.domain !== 'roaming' || ATTACH_ROAMING_ALLOW.has(sc.id)) {
       // 시나리오 측정요원 전원 ON → 실제 attach 절차/거절 로그 스트리밍 (결과 관측)
       for (const pid of createdPersons) get().togglePersonUe(pid)
+    }
+    // startTraffic: attach 후 생성 UE의 트래픽을 실제로 ON → capacity-tick 게이트(#26/#59/#69/AMBR)가
+    // 실제로 발동하도록. togglePersonTraffic의 RAN/코어 가드를 통과한 UE만 켜진다(정직).
+    if (sc.startTraffic) {
+      for (const pid of createdPersons) {
+        if (get().personUeOn[pid] && !get().personBarred[pid]) get().togglePersonTraffic(pid)
+      }
     }
     // note 안내가 있으면 로그에 병기 (수동 조작 필요 사항)
     for (const op of sc.setup) {
       if (op.op === 'note') get().addEvent('SIM', 'info', `↳ ${op.text}`)
+    }
+    // autoCall: attach가 흐른 뒤 생성 UE 2명 간 실제 VoNR 통화를 발신 → voice.ts/startCall이
+    // 실제 SIP/MMTEL 플로우(180/302/486/503/504/603 등)를 실 상태에서 방출. 부가서비스/착신전환 대상/
+    // 통화중 유발용 선행통화(preCall)를 시나리오에서 선언적으로 받는다.
+    if (sc.autoCall && createdPersons.length >= 2) {
+      const cc = sc.call ?? {}
+      setTimeout(() => {
+        const s1 = get()
+        const idByName = (nm?: string) =>
+          nm ? s1.objects.find((o) => o.kind === 'person' && o.name === nm)?.id : undefined
+        const fromId = idByName(cc.fromName) ?? createdPersons[0]
+        const toId = idByName(cc.toName) ?? createdPersons[1]
+        if (!fromId || !toId || fromId === toId) return
+        const cfId = idByName(cc.cfTargetName)
+        get().setPersonTrafficType(fromId, 'voice')
+        get().setPersonCallee(fromId, toId)
+        if (cc.callerSupp) get().setPersonSupp(fromId, cc.callerSupp)
+        if (cc.calleeSupp || cfId) {
+          get().setPersonSupp(toId, { ...(cc.calleeSupp ?? {}), ...(cfId ? { cfTarget: cfId } : {}) })
+        }
+        // 착신자를 통화중으로 만들기 위한 선행 통화(CFB/CW 유발). 선행 통화가 inviting인 동안
+        // 본 통화가 오면 startCall의 busy 분기(486/302/180)가 실제로 발동한다.
+        const pFrom = idByName(cc.preCallFromName)
+        const pTo = idByName(cc.preCallToName)
+        if (pFrom && pTo && pFrom !== pTo) get().startCall(pFrom, pTo)
+        get().startCall(fromId, toId)
+      }, 3900)
     }
     // BUG2: 전용 call-flow 시나리오면 attach 로그가 흐른 뒤 해당 빌더의 절차(페이징/RNAU/GUTI 재배정/
     // MRO/Reroute NAS)를 실제로 스트리밍한다. buildServiceRequestSteps/buildDeregisterSteps과 동일하게
@@ -2465,6 +2516,33 @@ export const useStore = create<State>((set, get) => ({
             )
             break
           }
+          case 'ho-ngap-n2':
+          case 'ho-xn': {
+            // N2(NGAP)/Xn 핸드오버 call-flow. 소스=서빙 RU, 타겟=다른 RU(없으면 합성 이름 — MRO와 동형).
+            const rus = s1.objects.filter((o) => o.kind === 'gnb' && (o.zone ?? 'A') === zoneR)
+            const src = fctx.servingName ?? rus[0]?.name ?? `RU-${zoneR}1`
+            const tgt = rus.find((r) => r.name !== src)?.name ?? `RU-${zoneR}2`
+            const mob = s1.mobility
+            steps = buildHandoverSteps({
+              ueName: obj.name, sourceRu: src, targetRu: tgt, amf: fctx.amf, upf: fctx.upf,
+              sourcePci: fctx.pci, targetPci: null, targetRsrp: -85,
+              a3Offset: mob.a3_offset_db, hysteresis: mob.hysteresis_db, tttMs: mob.ttt_ms, cioDb: mob.cio_db,
+              xn: sc.id === 'ho-xn',
+            })
+            break
+          }
+          case 'dereg-ue-switchoff':
+            // UE 개시 Deregistration (switch-off) — buildDeregisterSteps 기본 분기.
+            steps = buildDeregisterSteps(fctx)
+            break
+          case 'dereg-nw-reregister':
+            // 망 개시 Deregistration (re-registration-required).
+            steps = buildDeregisterSteps(fctx, { nwInit: true, reason: 'subscription/policy change' })
+            break
+          case 'sr-idle-to-connected':
+            // Service Request (CM-IDLE → CM-CONNECTED).
+            steps = buildServiceRequestSteps(fctx)
+            break
         }
         for (const st of steps)
           get().addEvent(st.source, st.level, st.msg, st.node, st.dir, imsi, st.from, st.to)

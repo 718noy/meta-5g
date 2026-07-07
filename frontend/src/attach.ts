@@ -90,6 +90,7 @@ export interface AttachCtx {
   upf: string | null
   // PART 1: 절차에 관여하는 부가 NF (있으면 discovery/policy/slice 단계 로그 표시)
   nrf?: string | null
+  nrfRequired?: boolean // SBA-strict: NRF required for NF discovery — if absent, discovery fails → registration aborted (nrf-spof)
   nssf?: string | null
   pcf?: string | null
   udr?: string | null
@@ -271,6 +272,12 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
     push('NF', sepp, 'N32-c handshake OK (mutual TLS / PRINS) — secure inter-PLMN interconnect to home PLMN established', sepp, amf, 'info', 'out')
   }
 
+  // ── NRF SPOF 게이트 (nrf-spof): SBA-strict 배포에서 NRF가 없으면 AUSF/UDM/SMF discovery 자체가
+  // 불가 → 신규 등록 중단 (TS 29.510). nrfRequired가 켜진 시나리오에서만 발동(기본 OFF → 레거시 유지).
+  if (ctx.nrfRequired && !ctx.nrf) {
+    push('NF', amf, 'Nnrf_NFDiscovery failure — NRF unreachable (no NF-profile registry) → AUSF/UDM/SMF discovery impossible → registration aborted (SBA SPOF, TS 29.510)', amf, ue, 'error', 'out')
+    return S
+  }
   // ── NRF: AMF가 인증/데이터 NF 발견(NF discovery/selection) ── (요청 AMF→NRF, 응답 NRF→AMF)
   if (ctx.nrf) {
     const ttl = ctx.nrfTtlSec ?? 30
