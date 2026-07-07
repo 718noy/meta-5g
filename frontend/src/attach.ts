@@ -114,6 +114,9 @@ export interface AttachCtx {
   rsrpDbm?: number | null // 서빙 셀에서 측정한 UE RSRP (S-criteria 판정용, Qrxlevmeas)
   qRxLevMinDbm?: number // SIB1 cellSelectionInfo Qrxlevmin (TS 38.304 §5.2.3.2)
   amfCongested?: boolean // AMF max_registered_ue 초과 → Registration Reject #22 Congestion
+  // #22 로그에 정직한 실수치를 싣기 위한 유효 등록 수/상한. 유효 수 = background_load_ue + 존 내 배치 등록 UE.
+  amfRegCount?: number // AMF에 등록된 유효 UE 수(배후 부하 + 배치 등록 UE) — #22 메시지 표기용
+  amfMaxUe?: number // AMF max_registered_ue 상한 — #22 메시지 표기용
   t3346Min?: number // #22 Congestion back-off 타이머 T3346 (분)
   t3512Min?: number // AMF 주기적 등록 갱신 타이머 T3512 (분, Registration Accept)
   // ── batch-2: Core/RRC 파라미터 → 표준 3GPP 원인/플로우 매핑 ──
@@ -223,7 +226,11 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   if (ctx.amfCongested) {
     const t3346 = ctx.t3346Min ?? 12
     const t3502 = ctx.t3502Min ?? 12
-    push('NF', amf, `Registration Reject (5GMM cause #22 congestion) — AMF at max_registered_ue; back-off timer T3346=${t3346} min, T3502=${t3502} min (reattempt) → UE`, amf, ue, 'error', 'out')
+    // 정직한 실수치: 유효 등록 모집단(배후 부하 + 배치 UE) / 상한. 예: "registered 10000 / 10000".
+    const cap = ctx.amfMaxUe != null && ctx.amfRegCount != null
+      ? ` (registered ${ctx.amfRegCount} / ${ctx.amfMaxUe})`
+      : ''
+    push('NF', amf, `Registration Reject (5GMM cause #22 congestion) — AMF at capacity${cap}; back-off timer T3346=${t3346} min, T3502=${t3502} min (reattempt) → UE`, amf, ue, 'error', 'out')
     return S
   }
   if (regType === 'initial') {
@@ -394,7 +401,7 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
     push('NF', ctx.chf, `CHF → SMF: Granted-Unit (GSU) — granted quota = ${quotaMb > 0 ? `${quotaMb} MB` : 'unlimited'} → charging started`, ctx.chf, smf, 'info', 'out')
   }
   if (!ctx.upf) {
-    push('NF', smf, 'UPF selection failed — no UPF → PDU Session Est. Reject (#26 insufficient resources)', smf, ue, 'error', 'out')
+    push('NF', smf, 'UPF selection failed — no UPF (PFCP cause 72, no resources available) → PDU Session Est. Reject (5GSM #26 insufficient resources)', smf, ue, 'error', 'out')
     return S
   }
   // NRF: SMF가 UPF 발견

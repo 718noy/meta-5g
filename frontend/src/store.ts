@@ -1183,17 +1183,19 @@ export const useStore = create<State>((set, get) => ({
       const zoneT = objZone(target!)
       const amfNf = activeNf(s0.coreNfs, zoneT, 'AMF', s0.siteDown)
       if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
-        const registered = s0.objects.filter((o) =>
+        const placed = s0.objects.filter((o) =>
           o.kind === 'person' && o.id !== id && (o.zone ?? 'A') === zoneT &&
           s0.personUeOn[o.id] &&
           imsiRegistered(s0.personImsi[o.id] ?? defaultImsi(s0.ueSim), s0.ueSim, s0.registeredImsis),
         ).length
-        if (registered >= amfNf.max_registered_ue) {
+        // 유효 등록 수 = 배후 부하(실 가입자 기반) + 배치 등록 UE. 정직한 실수치를 로그에 표기.
+        const effective = (amfNf.background_load_ue ?? 0) + placed
+        if (effective >= amfNf.max_registered_ue) {
           get().addEvent('NF', 'error',
             pick(s0.lang,
-              `${target?.name}: Registration/Service Reject #22 Congestion — AMF 등록 상한(${amfNf.max_registered_ue}) 초과, 백오프 T3346`,
-              `${target?.name}: Registration/Service Reject #22 congestion — AMF max_registered_ue(${amfNf.max_registered_ue}) exceeded, T3346 backoff`,
-              `${target?.name}: Registration/Service Reject #22 拥塞 — AMF 注册上限(${amfNf.max_registered_ue}) 超出, 回退 T3346`),
+              `${target?.name}: Registration/Service Reject #22 Congestion — AMF 용량 도달(등록 ${effective}/${amfNf.max_registered_ue}), 백오프 T3346`,
+              `${target?.name}: Registration/Service Reject #22 congestion — AMF at capacity (registered ${effective}/${amfNf.max_registered_ue}), T3346 backoff`,
+              `${target?.name}: Registration/Service Reject #22 拥塞 — AMF 达到容量(注册 ${effective}/${amfNf.max_registered_ue}), 回退 T3346`),
             target?.name, undefined, imsi)
           return true
         }
@@ -1455,13 +1457,20 @@ export const useStore = create<State>((set, get) => ({
     const t3512Min = amfNf?.t3512_min ?? 54 // 4) AMF 주기적 등록 갱신 타이머 (Registration Accept)
     let amfCongested = false
     let t3346Min: number | undefined
+    let amfRegCount: number | undefined
+    let amfMaxUe: number | undefined
     if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
-      const registered = s0.objects.filter((o) =>
+      const placed = s0.objects.filter((o) =>
         o.kind === 'person' && o.id !== id && (o.zone ?? 'A') === zone &&
         s0.personUeOn[o.id] &&
         imsiRegistered(s0.personImsi[o.id] ?? defaultImsi(s0.ueSim), s0.ueSim, s0.registeredImsis),
       ).length
-      if (registered >= amfNf.max_registered_ue) { amfCongested = true; t3346Min = 12 }
+      // 유효 등록 수 = 배후 부하(실 가입자 기반) + 3D에 배치된 등록 UE. 배후 부하가 크면
+      // 소수 배치 UE 없이도 망이 진짜로 상한에 도달 → 정직한 혼잡(TS 23.501 §5.19.5).
+      const effective = (amfNf.background_load_ue ?? 0) + placed
+      amfRegCount = effective
+      amfMaxUe = amfNf.max_registered_ue
+      if (effective >= amfNf.max_registered_ue) { amfCongested = true; t3346Min = 12 }
     }
 
     // ── batch-2: Core/RRC 파라미터 해석 → 표준 원인/플로우 ──
@@ -1498,7 +1507,7 @@ export const useStore = create<State>((set, get) => ({
       nrf: nf('NRF'), nssf: nf('NSSF'), pcf: nf('PCF'), udr: nf('UDR'), chf: nf('CHF'), bsf: nf('BSF'),
       dn: s0.coreDn[zone], zone, imsiRegistered: imsiRegistered(imsi, s0.ueSim, s0.registeredImsis),
       requestedSst, allowedSst: allowed, sliceSst: allowed.includes(ti.sst) ? ti.sst : allowed[0],
-      cellBarred, rsrpDbm, qRxLevMinDbm, amfCongested, t3346Min, t3512Min,
+      cellBarred, rsrpDbm, qRxLevMinDbm, amfCongested, amfRegCount, amfMaxUe, t3346Min, t3512Min,
       maxAllowedNssai, authFailMode, implicitDeregMin, nrfTtlSec,
       t300Ms: mob.t300_ms, raResponseWindowMs: mob.ra_response_window_ms,
       ssbPeriodicityMs: mob.ssb_periodicity_ms, sib1PeriodicityMs: mob.sib1_periodicity_ms,
@@ -1565,12 +1574,14 @@ export const useStore = create<State>((set, get) => ({
       if (eligible) {
         const amfNf = activeNf(s.coreNfs, zoneP, 'AMF', s.siteDown)
         if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
-          const registered = s.objects.filter((o) =>
+          const placed = s.objects.filter((o) =>
             o.kind === 'person' && o.id !== p.id && (o.zone ?? 'A') === zoneP &&
             s.personUeOn[o.id] &&
             imsiRegistered(s.personImsi[o.id] ?? defaultImsi(s.ueSim), s.ueSim, s.registeredImsis),
           ).length
-          if (registered >= amfNf.max_registered_ue) eligible = false
+          // 유효 등록 수 = 배후 부하 + 배치 등록 UE
+          const effective = (amfNf.background_load_ue ?? 0) + placed
+          if (effective >= amfNf.max_registered_ue) eligible = false
         }
       }
       next[p.id] = eligible
@@ -2219,6 +2230,14 @@ export const useStore = create<State>((set, get) => ({
   applyScenario: (id) => {
     const sc = SCENARIOS.find((s) => s.id === id)
     if (!sc) return
+    if (sc.simulable !== true) {
+      // 정직성 게이트: 실제 시뮬 불가 시나리오는 아무것도 바꾸지 않는다.
+      get().addEvent('SIM', 'warn', pick(get().lang,
+        `🚫 "${sc.ko}" — 현재 엔진에서 실제 시뮬레이션 불가 (설명용). 씬/로그 변경 없음. 예상 절차: ${sc.cause ?? sc.desc_ko ?? ''}`,
+        `🚫 "${sc.en}" — not simulable in the current engine (descriptive only). No scene/log change. Expected: ${sc.cause ?? sc.desc_en ?? ''}`,
+        `🚫 "${sc.zh}" — 当前引擎无法实际仿真 (仅说明). 无场景/日志变更. 预期: ${sc.cause ?? sc.desc_zh ?? ''}`))
+      return
+    }
     // 기존 구성을 전부 지우고 시나리오대로 새로 배치 (Core+RAN+측정요원 자동 구성)
     const objects: SceneObject[] = []
     let coreNfs: CoreNf[] = []

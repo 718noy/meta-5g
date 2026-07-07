@@ -126,6 +126,12 @@ export interface NfParams {
   throughput_per_pod?: number // 파드당 처리량 상한(Mbps, UL+DL 합) — 초과 시 HPA 스케일아웃
   // NF-type-specific 접속 제어(admission) — 미지정/0 = 무제한.
   max_registered_ue?: number // AMF 등록 UE 상한 (TS 23.501 §5.19.5). 0/undefined = 무제한
+  // 합성 배후 부하(background load) — 이미 등록/접속된 실 가입자 기반을 나타내는 UE 수.
+  // 3D에 개별 배치되지 않는 "실 가입자 모집단"(TS 23.501 §5.19.5 admission은 등록 모집단 전체에 대해 수행).
+  // 배치된 UE 수에 이 값을 더해 유효 부하를 산출 → 브라우저에서 수천 UE를 못 만드는 한계를 부하 숫자로 모델링.
+  // 실제 혼잡은 "작은 상한을 4개 UE로 넘김"이 아니라 "큰 용량 + 큰 가입자 기반"에서 나와야 정직하다.
+  // undefined/0 = 배후 부하 없음(무영향, 비차단). 기본값 0.
+  background_load_ue?: number
   max_pdu_sessions?: number // SMF PDU 세션 상한 (TS 23.501 §5.6). undefined = 무제한
   t3512_min?: number // AMF 주기적 등록 갱신 타이머 (분, TS 24.501). default 54
   implicit_dereg_min?: number // AMF implicit de-registration 타이머 (분, TS 23.501 §5.3.4). undefined = 미설정
@@ -157,6 +163,8 @@ export const DEFAULT_NF: NfParams = {
   max_allowed_nssai: 8, // NSSF 동시 허용 S-NSSAI 기본 (8개)
   auth_fail_mode: 'none', // 인증 장애 주입 없음(정상)
   max_registered_ue: 0, // 0 = 무제한(등록 상한 없음) — 기본 트래픽 허용
+  background_load_ue: 0, // 0 = 배후 가입자 부하 없음(무영향) — 실 가입자 기반 없음
+
   max_pdu_sessions: 0, // 0 = 무제한(세션 상한 없음)
   implicit_dereg_min: 0, // 0 = 비활성(암시적 디레지 없음)
   n4_heartbeat_sec: 0, // 0 = OFF(N4 liveness 실패 없음) — 무차단

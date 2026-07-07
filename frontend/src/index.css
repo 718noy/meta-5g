@@ -1386,9 +1386,9 @@ button.danger:hover {
 .corepanel {
   top: 118px;
   /* 좌측 앵커(중앙 근처) — 우하단 네이티브 리사이저가 재중앙정렬로 튀지 않고 매끄럽게 커지도록 */
-  left: max(12px, calc(50% - 320px));
-  width: min(640px, calc(100vw - 560px));
-  min-width: 420px;
+  left: max(12px, calc(50% - 470px));
+  width: min(940px, calc(100vw - 280px));
+  min-width: 620px;
   max-width: 95vw;
   min-height: 280px;
   max-height: calc(100vh - 160px);

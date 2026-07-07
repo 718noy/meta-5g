@@ -39,8 +39,9 @@ export function ScenarioPanel() {
       <div className="scenario-list">
         {SCENARIOS.map((sc) => {
           const res = sc.expect({ objects, coreNfs, coreDn, homeZone })
+          const descriptive = sc.simulable !== true
           return (
-            <div key={sc.id} className={`scenario-row ${sc.category}`}>
+            <div key={sc.id} className={`scenario-row ${sc.category}${descriptive ? ' descriptive' : ''}`}>
               <div className="scenario-main">
                 <div className="scenario-title">
                   <span className={`scenario-tag ${sc.category}`}>
@@ -52,6 +53,11 @@ export function ScenarioPanel() {
                       ✔ {pick(lang, '실스택 검증', 'stack-verified', '真实栈验证')}
                     </span>
                   )}
+                  {descriptive && (
+                    <span className="scenario-descriptive" style={{ opacity: 0.6, fontSize: '0.85em', marginLeft: 6 }} title={pick(lang, '이 시나리오는 현재 엔진에서 실제 시뮬 불가 — 설명용. Apply 시 안내만 표시, 씬 변경 없음.', 'Not simulable in the current engine — descriptive only. Apply shows a notice, no scene change.', '当前引擎无法实际仿真 — 仅说明。Apply 仅显示提示,无场景变更。')}>
+                      ⓘ {pick(lang, '설명용', 'descriptive', '仅说明')}
+                    </span>
+                  )}
                 </div>
                 <div className="scenario-desc">{pick(lang, sc.desc_ko, sc.desc_en, sc.desc_zh)}</div>
                 <div className="scenario-ref">📘 {sc.ref}</div>
@@ -61,8 +67,15 @@ export function ScenarioPanel() {
               </div>
               <button
                 className="scenario-apply"
-                title={pick(lang, '이 시나리오대로 씬을 새로 구성해 재현·검증 (기존 배치 초기화)', 'Rebuild the scene per this scenario to reproduce & verify (clears current setup)', '按此场景重建场景以复现·验证 (清除当前布置)')}
+                title={descriptive
+                  ? pick(lang, '이 시나리오는 설명용 — Apply 시 안내만 표시, 변경 없음', 'This scenario is descriptive-only — Apply just shows a notice, no change', '此场景仅供说明 — Apply 仅显示提示,无变更')
+                  : pick(lang, '이 시나리오대로 씬을 새로 구성해 재현·검증 (기존 배치 초기화)', 'Rebuild the scene per this scenario to reproduce & verify (clears current setup)', '按此场景重建场景以复现·验证 (清除当前布置)')}
                 onClick={() => {
+                  if (descriptive) {
+                    // 설명용 시나리오 — 씬 변경 없이 스토어 게이트가 안내 로그만 남긴다.
+                    applyScenario(sc.id)
+                    return
+                  }
                   const ok = window.confirm(
                     pick(lang,
                       '기존 설정(장비·측정요원·Core 등)이 모두 지워지고 이 검증 시나리오에 따라 새로 배치됩니다. 계속할까요?',
@@ -72,7 +85,7 @@ export function ScenarioPanel() {
                   if (ok) applyScenario(sc.id)
                 }}
               >
-                {pick(lang, '적용', 'Apply', '应用')}
+                {descriptive ? pick(lang, '안내', 'Info', '提示') : pick(lang, '적용', 'Apply', '应用')}
               </button>
             </div>
           )

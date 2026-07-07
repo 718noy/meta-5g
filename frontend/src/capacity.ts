@@ -105,6 +105,10 @@ function personRsrp(p: SceneObject, sim: SimResult | null): number | null {
 // 반복은 부족분(deficit=CE0−SNR)만큼 필요하며 3dB/2배 결합이득 근사. 부족분이 최대이득(20dB)
 // 초과(≈SNR<-26dB)거나 NPRACH 반복 상한(128)을 넘으면 CE로도 미달 → 접속 불가(inCoverage=false).
 // SINR을 링크 마진 프록시로 사용(근사 모델 — 실제 ray-tracing/BLER 곡선 아님).
+// 배후 부하(background_load_ue)를 UPF 사용자평면 부하로 환산할 때의 가입자당 평균 처리량(Mbps).
+// 실 가입자 기반은 3D에 배치되지 않으므로 UE 수를 혼잡시 가입자당 평균 활성 스루풋으로 근사한다.
+// (busy-hour 평균 ~0.5Mbps/subscriber — AMF/SMF는 UE/세션 카운트로, UPF는 이 환산 Mbps로 반영.)
+const BACKGROUND_UE_MBPS = 0.5
 const NBIOT_LTEM_MAX_MBPS = 1.0 // 협대역/저Cat 단말 DL 처리량 상한 (LTE-M ~1Mbps)
 const CE0_SNR_DB = -6.0
 const CE_MAX_GAIN_DB = 20.0
@@ -769,22 +773,27 @@ export function useCapacitySim() {
           continue
         }
         const cap = NF_CAPACITY_PER_POD[nf.nf_type]
+        // 배후 부하(실 가입자 기반) — 3D에 배치되지 않은 등록/접속 UE 수. 배치 UE 수에 더해
+        // NF 부하를 산출 → 과부하가 "4~8개 배치 UE"가 아니라 진짜 대규모 부하를 반영한다.
+        const bgUe = nf.background_load_ue ?? 0
         let usage = 0
-        if (nf.nf_type === 'AMF') usage = ueCount[nf.zone]
-        else if (nf.nf_type === 'SMF') usage = sessions[nf.zone]
+        if (nf.nf_type === 'AMF') usage = ueCount[nf.zone] + bgUe
+        else if (nf.nf_type === 'SMF') usage = sessions[nf.zone] + bgUe
         else if (nf.nf_type === 'UPF') {
-          // 걷는 UE(로밍 시 홈 UPF도 경유) + 해당 존 측정요원 트래픽 합
+          // 걷는 UE(로밍 시 홈 UPF도 경유) + 해당 존 측정요원 트래픽 합 + 배후 가입자 환산 스루풋
           // 로밍: UE가 방문존이면 방문 UPF + 홈(homeZone) UPF 둘 다 경유
           const roaming = st.ueZone != null && st.ueZone !== st.homeZone
           const walkingInPath =
             st.trafficActive &&
             (st.ueZone === nf.zone || (roaming && nf.zone === st.homeZone))
-          usage = (walkingInPath ? st.trafficMbps : 0) + personTrafficByZone[nf.zone]
+          usage = (walkingInPath ? st.trafficMbps : 0) + personTrafficByZone[nf.zone] +
+            bgUe * BACKGROUND_UE_MBPS
         } else {
-          // 제어 NF: 존 UE 수에 비례하는 가벼운 부하만 표시
+          // 제어 NF: 존 UE 수(+배후 부하)에 비례하는 가벼운 부하만 표시
+          const ctlUe = ueCount[nf.zone] + bgUe
           loads[nf.id] = {
-            load: Math.min(ueCount[nf.zone] / 500, 0.5),
-            cpu: 8 + Math.min(ueCount[nf.zone] / 10, 40),
+            load: Math.min(ctlUe / 500, 0.5),
+            cpu: 8 + Math.min(ctlUe / 10, 40),
           }
           continue
         }
@@ -836,16 +845,16 @@ export function useCapacitySim() {
           warned.current[nf.id] = true
           const react = pick(st.lang,
             (nf.nf_type === 'AMF' ? 'NGAP Overload Start → 신규 등록 거부, 백오프 T3346 부여'
-              : nf.nf_type === 'SMF' ? '신규 PDU 세션 수립 거부 (자원 부족)'
-              : nf.nf_type === 'UPF' ? '패킷 드롭/큐잉 지연 — 처리량 한계'
+              : nf.nf_type === 'SMF' ? 'HTTP 503 Service Unavailable + Retry-After (SBI 과부하)'
+              : nf.nf_type === 'UPF' ? 'PFCP OCI (Overload Control) — 패킷 드롭, SMF가 타 UPF 재선택'
               : `신규 ${cap?.metric ?? ''} 수용 거부`),
             (nf.nf_type === 'AMF' ? 'NGAP Overload Start → new registrations rejected, T3346 backoff'
-              : nf.nf_type === 'SMF' ? 'new PDU sessions rejected (no resources)'
-              : nf.nf_type === 'UPF' ? 'packet drop / queuing delay — throughput limit'
+              : nf.nf_type === 'SMF' ? 'HTTP 503 Service Unavailable + Retry-After (SBI overload)'
+              : nf.nf_type === 'UPF' ? 'PFCP OCI (Overload Control Info) — packet drop, SMF re-selects UPF'
               : `new ${cap?.metric ?? ''} rejected`),
             (nf.nf_type === 'AMF' ? 'NGAP Overload Start → 拒绝新注册，赋予 T3346 回退'
-              : nf.nf_type === 'SMF' ? '拒绝新建 PDU 会话（资源不足）'
-              : nf.nf_type === 'UPF' ? '丢包/排队时延 — 吞吐上限'
+              : nf.nf_type === 'SMF' ? 'HTTP 503 Service Unavailable + Retry-After (SBI 过载)'
+              : nf.nf_type === 'UPF' ? 'PFCP OCI (过载控制) — 丢包，SMF 重选其他 UPF'
               : `拒绝新 ${cap?.metric ?? ''}`))
           st.addEvent('NF', 'warn',
             pick(st.lang,

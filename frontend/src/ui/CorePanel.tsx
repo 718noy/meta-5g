@@ -5,6 +5,7 @@ import { NF_DESC, pick, useT } from '../i18n'
 import { useStore } from '../store'
 import { frontRef } from './zorder'
 import { usePanelDrag } from './panelDrag'
+import { GnbRfFields, GnbDuFields, GnbCuFields } from './ParamsPanel'
 import type { CoreNf, NfType, RanUnit, SceneObject, Zone } from '../types'
 import { DEFAULT_MAX_REPLICAS, NF_CAPACITY_PER_POD, NF_INFO, NF_TYPES, ZONES, activeNf, nfUp, objZone } from '../types'
 
@@ -796,12 +797,16 @@ function RanCuRow({ cu }: { cu: RanUnit }) {
   const [open, setOpen] = useState(false)
   const lang = useStore((s) => s.lang)
   const ranUnits = useStore((s) => s.ranUnits)
+  const objects = useStore((s) => s.objects)
   const coreNfs = useStore((s) => s.coreNfs)
   const siteDown = useStore((s) => s.siteDown)
   const updateRanUnit = useStore((s) => s.updateRanUnit)
   const toggleRanUnit = useStore((s) => s.toggleRanUnit)
   const removeRanUnit = useStore((s) => s.removeRanUnit)
-  const duCount = ranUnits.filter((u) => u.kind === 'du' && u.cu_id === cu.id).length
+  const cuDuIds = ranUnits.filter((u) => u.kind === 'du' && u.cu_id === cu.id).map((d) => d.id)
+  const duCount = cuDuIds.length
+  // 이 CU 하위(연결된 DU들)에 프론트홀로 붙은 RU들 — CU 계층(RRC/이동성/PDCP) 파라미터 편집 대상
+  const cuRus = objects.filter((o) => o.kind === 'gnb' && !!o.gnb?.du_id && cuDuIds.includes(o.gnb.du_id))
 
   const amfs = coreNfs.filter((n) => n.nf_type === 'AMF' && n.zone === cu.zone)
   const upfs = coreNfs.filter((n) => n.nf_type === 'UPF' && n.zone === cu.zone)
@@ -874,6 +879,21 @@ function RanCuRow({ cu }: { cu: RanUnit }) {
                 '⚠ CU not connected to Core → RUs under this CU cannot carry traffic/calls',
                 '⚠ CU未连接到核心网 → 此CU下的RU无法承载流量/通话')}
             </div>
+          )}
+          {/* CU 계층(RRC/이동성/측정/PDCP) 파라미터 — 이 CU 하위 각 RU의 gnb 필드를 여기서 편집 (TS 38.401) */}
+          {cuRus.length === 0 ? (
+            <div className="material-note" style={{ borderLeft: '3px solid #ffb43d' }}>
+              {pick(lang, '연결된 RU 없음', 'No connected RU', '无连接RU')}
+            </div>
+          ) : (
+            cuRus.map((ru) => (
+              <div key={ru.id}>
+                {cuRus.length > 1 && (
+                  <div className="section-label sub-bold">📡 {ru.name}</div>
+                )}
+                <GnbCuFields obj={ru} />
+              </div>
+            ))
           )}
         </div>
       )}
@@ -986,6 +1006,21 @@ function RanDuRow({ du }: { du: RanUnit }) {
               ? `→ ${parentCu!.name} → ${coreAmf!.name} (N2) · ${coreUpf!.name} (N3)`
               : `⚠ ${pick(lang, 'Core 미도달', 'Core unreachable', '核心网不可达')}: ${coreMissing}`}
           </div>
+          {/* DU 계층(RLC/MAC/PHY-high·스케줄링) 파라미터 — 연결된 각 RU의 gnb 필드를 여기서 편집 (TS 38.401) */}
+          {connectedRus.length === 0 ? (
+            <div className="material-note" style={{ borderLeft: '3px solid #ffb43d' }}>
+              {pick(lang, '연결된 RU 없음', 'No connected RU', '无连接RU')}
+            </div>
+          ) : (
+            connectedRus.map((ru) => (
+              <div key={ru.id}>
+                {connectedRus.length > 1 && (
+                  <div className="section-label sub-bold">📡 {ru.name}</div>
+                )}
+                <GnbDuFields obj={ru} />
+              </div>
+            ))
+          )}
         </div>
       )}
     </div>
@@ -997,7 +1032,7 @@ function RanRuRow({ ru }: { ru: SceneObject }) {
   const lang = useStore((s) => s.lang)
   const ranUnits = useStore((s) => s.ranUnits)
   const updateGnb = useStore((s) => s.updateGnb)
-  const select = useStore((s) => s.select)
+  const [open, setOpen] = useState(false)
   const g = ru.gnb
   if (!g) return null
   const isNr = g.radio_tech === 'nr'
@@ -1033,12 +1068,18 @@ function RanRuRow({ ru }: { ru: SceneObject }) {
         </select>
         <button
           className="log-btn"
-          title={pick(lang, '이 RU의 전체 무선 파라미터 설정 열기 (주파수·출력·안테나…)', 'Open this RU’s full radio settings (freq/power/antenna…)', '打开此RU的全部无线参数设置 (频率·功率·天线…)')}
-          onClick={() => select(ru.id)}
+          title={pick(lang, '이 RU의 전체 무선 파라미터 펼치기/접기 (주파수·출력·안테나·이동성…)', 'Expand/collapse this RU’s full radio params (freq/power/antenna/mobility…)', '展开/收起此RU的全部无线参数 (频率·功率·天线·移动性…)')}
+          onClick={() => setOpen((o) => !o)}
         >
-          ⚙
+          {open ? '▾ ⚙' : '▸ ⚙'}
         </button>
       </div>
+      {open && (
+        <div className="nf-row-body">
+          {/* RU 행은 RF/PHY-low 필드만 편집 (TS 38.401 기능분할). DU/CU 필드는 각 DU/CU 행에서 편집. */}
+          <GnbRfFields obj={ru} />
+        </div>
+      )}
     </div>
   )
 }

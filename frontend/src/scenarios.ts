@@ -21,6 +21,7 @@ export interface Scenario {
   cause?: string // 3GPP cause code (예: '5GSM #27', '#3 Illegal UE', 'PFCP 72')
   domain?: string // 도메인 분류 (registration/auth/pdu/ran/vonr/roaming/scale/userplane/charging/iot/snpn/multirat)
   validated?: boolean // 실제 Open5GS/UERANSIM 스택으로 ground-truth 검증됨
+  simulable?: boolean // true = Apply가 실제 상태에서 결과를 냄; 미지정/false = 현재 엔진에서 시뮬 불가(설명용) → Apply는 메시지만, 씬 변경 없음
   category: 'success' | 'failure'
   // 기대 결과 판정 (현재 씬 상태로부터)
   expect: (ctx: {
@@ -59,7 +60,7 @@ export type SetupOp =
 // ── 시나리오 카탈로그 ──────────────────────────────────────────
 export const SCENARIOS: Scenario[] = [
   {
-    id: 'happy-reg',
+    id: 'happy-reg', simulable: true,
     ko: '정상 등록 + 세션', en: 'Successful registration + session',
     zh: '正常注册 + 会话',
     desc_ko: 'RU + 완전한 5GC(AMF/AUSF/UDM/SMF/UPF) + DN → 등록·인증·PDU 세션 성립.',
@@ -83,7 +84,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'auth-fail-udm',
+    id: 'auth-fail-udm', simulable: true,
     ko: '인증 실패 (UDM 부재)', en: 'Auth failure (no UDM)',
     zh: '鉴权失败 (无 UDM)',
     desc_ko: 'UDM 없음 → AUSF가 Nudm_UEAuthentication_Get 실패 → 인증 절차 미완 → AMF가 Registration Reject.',
@@ -107,7 +108,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'no-suitable-cell',
+    id: 'no-suitable-cell', simulable: true,
     ko: 'No Suitable Cell (RU 없음)', en: 'No suitable cell (no RU)',
     zh: 'No Suitable Cell (无 RU)',
     desc_ko: 'RU 없음 → RRC 셀 선택 실패 (No suitable/acceptable cell) → UE 무서비스. (UERANSIM 실로그와 동일)',
@@ -128,7 +129,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'pdu-reject-dnn',
+    id: 'pdu-reject-dnn', simulable: true,
     ko: 'PDU 세션 거부 (SMF/UPF 부재)', en: 'PDU session reject (no SMF/UPF)',
     zh: 'PDU Session 拒绝 (无 SMF/UPF)',
     desc_ko: '등록은 되지만 SMF/UPF 없음 → AMF가 Nsmf_PDUSession_CreateSMContext 실패 → PDU Session Est. Reject (5GSM #26/#31 insufficient resources).',
@@ -253,23 +254,23 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'congestion',
+    id: 'congestion', simulable: true,
     ko: '혼잡 (대량 사용자)', en: 'Congestion (mass users)',
     zh: '拥塞 (海量用户)',
-    desc_ko: '완전한 5GC + AMF max_registered_ue=2 + 측정요원 4명 → 3·4번째 UE가 실제 AMF admission 게이트에서 Registration Reject 5GMM #22 혼잡 + T3346 백오프.',
-    desc_en: 'Full 5GC + AMF max_registered_ue=2 + 4 UEs → 3rd/4th UE hits the real AMF admission gate → Registration Reject 5GMM #22 congestion + T3346 backoff.',
-    desc_zh: '完整 5GC + AMF max_registered_ue=2 + 部署 4 个 UE → 第 3/4 个 UE 在真实 AMF 准入门被 Registration Reject 5GMM #22 拥塞 + T3346 退避。',
+    desc_ko: '완전한 5GC + AMF 용량 10,000 + 배후 가입자 부하 10,000(실 가입자 기반, 3D 미배치) → 망이 진짜로 10,000/10,000에 도달. 측정요원 1명을 켜면 AMF admission 게이트에서 Registration Reject 5GMM #22 혼잡 + T3346. (조작된 작은 상한이 아니라 정직한 대규모 부하)',
+    desc_en: 'Full 5GC + AMF capacity 10,000 + background subscriber load 10,000 (real base, not placed in 3D) → the network is genuinely at 10,000/10,000. Power on 1 measurement UE → AMF admission gate → Registration Reject 5GMM #22 congestion + T3346. (Honest mass load, not a rigged tiny cap.)',
+    desc_zh: '完整 5GC + AMF 容量 10,000 + 背景订户负载 10,000(真实基数,不在 3D 部署)→ 网络真正达到 10,000/10,000。开启 1 个测量 UE → AMF 准入门 → Registration Reject 5GMM #22 拥塞 + T3346。(诚实的大规模负载,而非被操纵的小上限。)',
     ref: 'TS 24.501 §5.5.1/§5.3.20 · TS 23.501 §5.19.5 admission control · 5GMM #22 · T3346',
-    cause: '5GMM #22 Congestion + T3346 (AMF max_registered_ue)', domain: 'registration', category: 'failure',
+    cause: '5GMM #22 Congestion + T3346 (AMF at 10,000/10,000)', domain: 'registration', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 4 },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 10000, background_load_ue: 10000 } },
+      { op: 'ensurePersons', zone: 'A', count: 1 },
     ],
-    expect: () => ({ label_ko: '3·4번째 UE Registration Reject #22 — AMF 혼잡(T3346)', label_en: '3rd/4th UE Registration Reject #22 — AMF congestion (T3346)' }),
+    expect: () => ({ label_ko: 'UE Registration Reject #22 — AMF 10,000/10,000 혼잡(T3346)', label_en: 'UE Registration Reject #22 — AMF 10,000/10,000 congestion (T3346)' }),
   },
   {
     id: 'pci-mod3',
@@ -304,12 +305,12 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'PRACH 실패/경합 지연 로그', label_en: 'PRACH failure / contention delay' }),
   },
   {
-    id: 'signaling-storm',
+    id: 'signaling-storm', simulable: true,
     ko: '시그널링 스톰 (AMF 과부하)', en: 'Signaling storm (AMF overload)',
     zh: '信令风暴 (AMF 过载)',
-    desc_ko: '대량 UE 동시 재등록(라우팅 장애 복구 등) → AMF 등록 폭주 → NGAP Overload Start·T3346 백오프. (실사례: NZ 3일/노르웨이 18h/Verizon 2026)',
-    desc_en: 'Mass simultaneous re-registration → AMF flood → NGAP Overload Start, T3346 backoff.',
-    desc_zh: '海量 UE 同时重注册(如路由故障恢复)→ AMF 注册洪泛 → NGAP Overload Start、T3346 退避。(真实事件:新西兰 3 天/挪威 18h/Verizon 2026)',
+    desc_ko: '대량 UE 동시 재등록(라우팅 장애 복구 등) → AMF 등록 폭주 → NGAP Overload Start·T3346 백오프. AMF 1파드(용량 10,000)에 배후 시그널링 부하 11,000 → 110% 과부하(정직한 대규모 부하). (실사례: NZ 3일/노르웨이 18h/Verizon 2026)',
+    desc_en: 'Mass simultaneous re-registration → AMF flood → NGAP Overload Start, T3346 backoff. 1 AMF pod (capacity 10,000) carries a background signalling load of 11,000 → 110% overload (honest mass load). (Incidents: NZ 3d, Norway 18h, Verizon 2026.)',
+    desc_zh: '海量 UE 同时重注册(如路由故障恢复)→ AMF 注册洪泛 → NGAP Overload Start、T3346 退避。1 个 AMF Pod(容量 10,000)承载背景信令负载 11,000 → 110% 过载(诚实的大规模负载)。(真实事件:新西兰 3 天/挪威 18h/Verizon 2026)',
     ref: 'TS 23.501 §5.19 overload control · T3346 backoff. Incidents: NZ 3d, Norway 18h, Verizon 2026',
     category: 'failure',
     setup: [
@@ -317,15 +318,15 @@ export const SCENARIOS: Scenario[] = [
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 8 },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, max_registered_ue: 10000, background_load_ue: 11000 } },
+      { op: 'ensurePersons', zone: 'A', count: 3 },
     ],
-    expect: () => ({ label_ko: 'AMF 과부하 → NGAP Overload/T3346 로그', label_en: 'AMF overload → NGAP Overload/T3346' }),
+    expect: () => ({ label_ko: 'AMF 11,000/10,000 과부하 → NGAP Overload/T3346', label_en: 'AMF 11,000/10,000 overload → NGAP Overload/T3346' }),
   },
 
   // ════════ 측위 (LCS / MT-LR) + NWDAF 분석 폐루프 — TS 23.273 · TS 38.305 · TS 23.288 ════════
   {
-    id: 'pos-mt-lr',
+    id: 'pos-mt-lr', simulable: true,
     ko: '측위 MT-LR (LMF/GMLC)', en: 'Positioning MT-LR (LMF/GMLC)', zh: '定位 MT-LR (LMF/GMLC)',
     desc_ko: '외부 LCS client → GMLC → AMF(Namf_Location) → LMF. LPP(Request/Provide Capabilities·LocationInformation) + NRPPa(PositioningInformation/Measurement). E-CID로 서빙셀+RSRP 지오메트리에서 coarse 위치 추정(실제 좌표+불확실도). DL-TDOA/Multi-RTT는 ≥3 TRP 필요(정확도는 PHY out-of-scope).',
     desc_en: 'External LCS client → GMLC → AMF(Namf_Location) → LMF. LPP + NRPPa. E-CID derives a coarse location from serving-cell + RSRP geometry (real coords + uncertainty). DL-TDOA/Multi-RTT need ≥3 TRPs (accuracy is PHY, out-of-scope).',
@@ -349,7 +350,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'pos-fail-unreachable',
+    id: 'pos-fail-unreachable', simulable: true,
     ko: '측위 실패 (UE 도달불가)', en: 'Positioning fail (UE unreachable)', zh: '定位失败 (UE 不可达)',
     desc_ko: 'UE가 MICO/CM-IDLE → AMF가 페이징으로 NAS 연결 수립 불가 → LCS "UE unreachable" 반환. 추가로 존 TRP<3이면 DL-TDOA/Multi-RTT는 GDOP 불량으로 애초에 불가(E-CID만 가능).',
     desc_en: 'UE in MICO/CM-IDLE → AMF cannot establish NAS connection via paging → LCS returns "UE unreachable". Also, with <3 TRPs in the zone DL-TDOA/Multi-RTT is infeasible (bad GDOP; only E-CID).',
@@ -400,7 +401,7 @@ export const SCENARIOS: Scenario[] = [
 
   // ════════ 등록/이동성 (5GMM) — TS 24.501 §5.5.1 ════════
   {
-    id: 'reg-fail-amf',
+    id: 'reg-fail-amf', simulable: true,
     ko: '등록 실패 (AMF 부재)', en: 'Registration fail (no AMF)', zh: '注册失败 (无 AMF)',
     desc_ko: 'AMF 없음 → N1/N2 종단 부재 → RRC는 붙지만 NGAP InitialUEMessage를 받을 NF가 없어 NAS 등록 불가.',
     desc_en: 'No AMF → no N1/N2 termination → RRC attaches but no NF to receive NGAP InitialUEMessage → NAS registration impossible.',
@@ -420,7 +421,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'reg-illegal-ue',
+    id: 'reg-illegal-ue', simulable: true,
     ko: '등록 거부 #3 (Illegal UE)', en: 'Registration reject #3 (Illegal UE)', zh: '注册拒绝 #3 (非法 UE)',
     desc_ko: 'IMSI가 UDM/UDR에 없는 unknown subscriber(오프로비저닝/인증실패) → Registration Reject 5GMM #3 → USIM의 5GS 무효(전원 off까지).',
     desc_en: 'IMSI unknown at UDM/UDR (unprovisioned/auth fail) → Registration Reject 5GMM #3 → USIM invalid for 5GS until power-off.',
@@ -488,21 +489,21 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Registration Reject #13 — Roaming not allowed in this TA', label_en: 'Registration Reject #13 — Roaming not allowed in TA' }),
   },
   {
-    id: 'reg-congestion-t3346',
+    id: 'reg-congestion-t3346', simulable: true,
     ko: '등록 거부 #22 (혼잡+T3346)', en: 'Registration reject #22 (congestion+T3346)', zh: '注册拒绝 #22 (拥塞+T3346)',
-    desc_ko: 'AMF NAS 레벨 혼잡 제어 → Registration Reject 5GMM #22 + T3346 백오프(무보호시 random ≈15-30min). 긴급/고우선/MT만 허용.',
-    desc_en: 'AMF NAS congestion control → Registration Reject 5GMM #22 + T3346 back-off (random if unprotected). Only emergency/high-prio/MT allowed.',
-    desc_zh: 'AMF NAS 级拥塞控制 → Registration Reject 5GMM #22 + T3346 退避(未保护时随机)。仅紧急/高优先/MT 允许。',
-    ref: 'TS 24.501 §5.3.20 · 5GMM #22 Congestion · T3346', cause: '5GMM #22 + T3346', domain: 'registration', category: 'failure',
+    desc_ko: 'AMF NAS 레벨 혼잡 제어 → Registration Reject 5GMM #22 + T3346 백오프. AMF 용량 10,000 + 배후 가입자 부하 10,000으로 망이 진짜 10,000/10,000 → 신규 UE 거부(긴급/고우선/MT만 허용).',
+    desc_en: 'AMF NAS congestion control → Registration Reject 5GMM #22 + T3346 back-off. AMF capacity 10,000 + background subscriber load 10,000 puts the network genuinely at 10,000/10,000 → new UE rejected (only emergency/high-prio/MT allowed).',
+    desc_zh: 'AMF NAS 级拥塞控制 → Registration Reject 5GMM #22 + T3346 退避。AMF 容量 10,000 + 背景订户负载 10,000 使网络真正达到 10,000/10,000 → 拒绝新 UE(仅紧急/高优先/MT 允许)。',
+    ref: 'TS 24.501 §5.3.20 · 5GMM #22 Congestion · T3346', cause: '5GMM #22 + T3346 (AMF at 10,000/10,000)', domain: 'registration', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 4 },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 10000, background_load_ue: 10000 } },
+      { op: 'ensurePersons', zone: 'A', count: 1 },
     ],
-    expect: () => ({ label_ko: 'Registration Reject #22 — Congestion (T3346 backoff)', label_en: 'Registration Reject #22 — Congestion (T3346)' }),
+    expect: () => ({ label_ko: 'Registration Reject #22 — AMF 10,000/10,000 (T3346)', label_en: 'Registration Reject #22 — AMF 10,000/10,000 (T3346)' }),
   },
   {
     id: 'reg-no-slices',
@@ -533,7 +534,7 @@ export const SCENARIOS: Scenario[] = [
 
   // ════════ 인증/보안 (5G-AKA/EAP-AKA') — TS 33.501 ════════
   {
-    id: 'auth-fail-ausf',
+    id: 'auth-fail-ausf', simulable: true,
     ko: '인증 실패 (AUSF 부재)', en: 'Auth fail (no AUSF)', zh: '鉴权失败 (无 AUSF)',
     desc_ko: 'AUSF 없음 → AMF/SEAF가 Nausf_UEAuthentication 시작 불가 → 5G-AKA 미완 → Registration Reject.',
     desc_en: 'No AUSF → SEAF cannot start Nausf_UEAuthentication → 5G-AKA incomplete → Registration Reject.',
@@ -552,7 +553,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'auth-mac-failure',
+    id: 'auth-mac-failure', simulable: true,
     ko: '인증 실패 #20 (MAC failure)', en: 'Auth failure #20 (MAC failure)', zh: '鉴权失败 #20 (MAC 失败)',
     desc_ko: 'K(root key) 불일치/미스프로비저닝 → USIM이 AUTN MAC 검증 실패 → AUTHENTICATION FAILURE 5GMM #20 MAC failure.',
     desc_en: 'K mismatch/misprovision → USIM AUTN MAC check fails → AUTHENTICATION FAILURE 5GMM #20 MAC failure.',
@@ -566,7 +567,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'AUTHENTICATION FAILURE #20 — MAC failure', label_en: 'AUTH FAILURE #20 — MAC failure' }),
   },
   {
-    id: 'auth-sync-failure',
+    id: 'auth-sync-failure', simulable: true,
     ko: '인증 재동기 #21 (Synch failure)', en: 'Auth resync #21 (Synch failure)', zh: '鉴权重同步 #21 (同步失败)',
     desc_ko: 'SQN 범위 벗어남 → USIM이 AUTS 포함 AUTHENTICATION FAILURE #21 → AUSF/UDM 재동기 → 재인증. 2연속 실패 시 reject.',
     desc_en: 'SQN out of range → USIM sends AUTHENTICATION FAILURE #21 with AUTS → AUSF/UDM resync → re-auth. Two in a row → reject.',
@@ -637,7 +638,7 @@ export const SCENARIOS: Scenario[] = [
 
   // ════════ PDU 세션 (5GSM) — TS 24.501 §6.4.1 ════════
   {
-    id: 'pdu-fail-smf',
+    id: 'pdu-fail-smf', simulable: true,
     ko: 'PDU 거부 (SMF 부재)', en: 'PDU reject (no SMF)', zh: 'PDU 拒绝 (无 SMF)',
     desc_ko: '등록은 되나 SMF 없음 → AMF의 Nsmf_PDUSession_CreateSMContext 대상 없음 → 세션 미생성 → 5GSM #26/#38.',
     desc_en: 'Registered but no SMF → no target for CreateSMContext → no session → 5GSM #26/#38.',
@@ -656,7 +657,7 @@ export const SCENARIOS: Scenario[] = [
     },
   },
   {
-    id: 'pdu-fail-upf-pfcp72',
+    id: 'pdu-fail-upf-pfcp72', simulable: true,
     ko: 'PDU 거부 (UPF 부재, PFCP 72)', en: 'PDU reject (no UPF, PFCP 72)', zh: 'PDU 拒绝 (无 UPF, PFCP 72)',
     desc_ko: 'UPF 없음 → SMF의 N4 PFCP Session Est 대상/association 없음 → PFCP cause 72 No established PFCP Association → 5GSM #26.',
     desc_en: 'No UPF → no N4 PFCP association/target → PFCP cause 72 No established PFCP Association → 5GSM #26.',
@@ -845,7 +846,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'RRCReject(waitTime) → T302 barring', label_en: 'RRCReject(waitTime) → T302 barring' }),
   },
   {
-    id: 'ran-cell-barred',
+    id: 'ran-cell-barred', simulable: true,
     ko: '셀 차단 (cellBarred)', en: 'Cell barred (cellBarred)', zh: '小区禁止 (cellBarred)',
     desc_ko: 'MIB/SIB1 cellBarred=barred → 300초간 이 셀 배제 + 재선택(intraFreqReselection에 따라 동주파 배제 여부). TS 38.304.',
     desc_en: 'MIB/SIB1 cellBarred=barred → cell excluded 300s + reselection. TS 38.304.',
@@ -1150,7 +1151,7 @@ export const SCENARIOS: Scenario[] = [
 
   // ════════ 스케일/과부하/NF 이중화 — TS 23.501 §5.19/5.21 ════════
   {
-    id: 'amf-pod-down-no-standby',
+    id: 'amf-pod-down-no-standby', simulable: true,
     ko: 'AMF 파드 다운 (이중화 없음)', en: 'AMF pod down (no standby)', zh: 'AMF Pod 宕机 (无备用)',
     desc_ko: '단일 인스턴스 AMF pod 다운(레플리카=1) → NRF에 가용 AMF 없음 → failover 불가 → 등록 불가(warm/cold=재등록 스톰).',
     desc_en: 'Single AMF pod down (replica=1) → no available AMF at NRF → no failover → no registration.',
@@ -1183,19 +1184,19 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'NRF SPOF — NF discovery/failover 불가', label_en: 'NRF SPOF — discovery/failover down' }),
   },
   {
-    id: 'nf-oom-death-spiral',
+    id: 'nf-oom-death-spiral', simulable: true,
     ko: 'NF 파드 OOMKilled (death-spiral)', en: 'NF pod OOMKilled (death-spiral)', zh: 'NF Pod OOMKilled (雪崩)',
-    desc_ko: '부하 급증 → pod OOMKilled → HPA 스케일 지연 → 남은 pod로 부하 집중 → 연쇄 재시작(death-spiral). 선행지표 pre-scale 필요.',
-    desc_en: 'Load surge → pod OOMKilled → HPA lag → load concentrates on survivors → cascading restarts (death-spiral).',
-    desc_zh: '负载激增 → pod OOMKilled → HPA 扩容滞后 → 负载集中到存活 pod → 级联重启(雪崩)。',
-    ref: 'TS 23.501 §5.19 overload · K8s HPA/OOM · cloud-native', cause: 'OOMKilled / HPA lag', domain: 'scale', category: 'failure',
+    desc_ko: '부하 급증 → pod OOMKilled → HPA 스케일 지연 → 남은 pod로 부하 집중 → 연쇄 재시작(death-spiral). AMF 1파드(용량 10,000)에 배후 부하 12,000 → 120% 지속 → OOMKilled(정직한 대규모 부하). 선행지표 pre-scale 필요.',
+    desc_en: 'Load surge → pod OOMKilled → HPA lag → load concentrates on survivors → cascading restarts (death-spiral). 1 AMF pod (capacity 10,000) with a background load of 12,000 → sustained 120% → OOMKilled (honest mass load). Pre-scale on leading indicators needed.',
+    desc_zh: '负载激增 → pod OOMKilled → HPA 扩容滞后 → 负载集中到存活 pod → 级联重启(雪崩)。1 个 AMF Pod(容量 10,000)承载背景负载 12,000 → 持续 120% → OOMKilled(诚实的大规模负载)。需按先行指标预扩容。',
+    ref: 'TS 23.501 §5.19 overload · K8s HPA/OOM · cloud-native', cause: 'OOMKilled / HPA lag (AMF 12,000/10,000)', domain: 'scale', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 8 },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, background_load_ue: 12000 } },
+      { op: 'ensurePersons', zone: 'A', count: 3 },
     ],
     expect: () => ({ label_ko: 'NF OOMKilled → HPA lag → death-spiral', label_en: 'NF OOMKilled → HPA lag → death-spiral' }),
   },
@@ -1327,7 +1328,7 @@ export const SCENARIOS: Scenario[] = [
 
   // ════════ IoT/RedCap/URLLC — TS 38.300/23.501 ════════
   {
-    id: 'redcap-barred',
+    id: 'redcap-barred', simulable: true,
     ko: 'RedCap 접속 불가 (SIB indicator)', en: 'RedCap access barred (SIB indicator)', zh: 'RedCap 接入受限 (SIB 指示)',
     desc_ko: 'SIB1에 RedCap indicator 없음/1-Rx barred → RedCap UE가 초기접속 admission 거부(Msg1/Msg3 조기식별).',
     desc_en: 'No RedCap indicator in SIB1 / 1-Rx barred → RedCap UE denied admission (Msg1/Msg3 early identification).',
@@ -1914,7 +1915,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: '이동성 등록 갱신 성공 (active-flag → UP 재활성)', label_en: 'Mobility reg update OK (UP reactivated)' }),
   },
   {
-    id: 'mro-too-late',
+    id: 'mro-too-late', simulable: true,
     ko: 'MRO: Too-Late 핸드오버', en: 'MRO: too-late handover', zh: 'MRO: 切换过晚',
     desc_ko: 'HO Command 이전에 서빙 급락 → N310→T310 만료 RLF → 다른(원래 target이 됐어야 할) 셀에 RRCReestablishment. RLF report=handover-too-late → CIO↑/TTT↓로 A3를 더 일찍 트리거하도록 조정.',
     desc_en: 'Serving degrades before any HO command → N310→T310 RLF → RRCReestablishment in a DIFFERENT cell. RLF report=handover-too-late → raise CIO / lower TTT to trigger A3 earlier.',
@@ -1927,7 +1928,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Too-late HO — HO 전 RLF → 다른 셀 재수립', label_en: 'Too-late HO — RLF before cmd → re-est different cell' }),
   },
   {
-    id: 'mro-too-early',
+    id: 'mro-too-early', simulable: true,
     ko: 'MRO: Too-Early 핸드오버', en: 'MRO: too-early handover', zh: 'MRO: 切换过早',
     desc_ko: 'A3가 너무 일찍 발동 → target으로 HO 직후 RLF → source 셀로 되돌아가 RRCReestablishment. RLF report=handover-too-early → CIO↓/TTT↑/A3 offset↑로 조기 HO 억제(ping-pong 방지).',
     desc_en: 'A3 fires too early → RLF just after handover → re-establish back in the SOURCE cell. RLF report=handover-too-early → lower CIO / raise TTT / raise A3 offset.',
@@ -1940,7 +1941,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Too-early HO — HO 직후 RLF → source 재수립', label_en: 'Too-early HO — RLF after HO → re-est source' }),
   },
   {
-    id: 'mro-wrong-cell',
+    id: 'mro-wrong-cell', simulable: true,
     ko: 'MRO: Wrong-Cell 핸드오버', en: 'MRO: handover to wrong cell', zh: 'MRO: 切换到错误小区',
     desc_ko: 'target으로 HO 후 RLF → source도 target도 아닌 제3의 셀에 RRCReestablishment. RLF report=handover-to-wrong-cell → 이웃 CIO 재튜닝으로 올바른 target이 A3에서 이기도록 조정.',
     desc_en: 'HO to target then RLF → re-establish in a THIRD cell (neither source nor target). RLF report=handover-to-wrong-cell → retune neighbor CIO so the correct target wins A3.',
@@ -2071,7 +2072,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Xn 핸드오버 성공 (Path Switch로 N3 경로 갱신)', label_en: 'Xn handover OK (Path Switch updates N3)' }),
   },
   {
-    id: 'reg-reroute-nas',
+    id: 'reg-reroute-nas', simulable: true,
     ko: 'Reroute NAS (다중 AMF 재라우팅)', en: 'Reroute NAS (multi-AMF re-allocation)', zh: 'Reroute NAS (多 AMF 重路由)',
     desc_ko: '초기 접속 AMF가 UE의 Requested-NSSAI를 서비스 불가(슬라이스 지원 분리) → NSSF로 target AMF-Set 조회 → Reroute NAS Message로 2번째 AMF에 NAS 전달 → target AMF가 등록 완료. 슬라이스 지원이 다른 AMF 2+ 인스턴스 필요.',
     desc_en: 'Initial AMF cannot serve the UE Requested-NSSAI (disjoint slice support) → query NSSF for target AMF-Set → Reroute NAS Message hands the NAS to a 2nd AMF → target AMF completes registration. Needs ≥2 AMF instances with disjoint slice support.',
@@ -2085,7 +2086,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Reroute NAS → target AMF가 등록 완료', label_en: 'Reroute NAS → target AMF completes registration' }),
   },
   {
-    id: 'reg-mico-unreachable',
+    id: 'reg-mico-unreachable', simulable: true,
     ko: 'MICO 모드 → MT 도달불가', en: 'MICO mode → MT unreachable', zh: 'MICO 模式 → MT 不可达',
     desc_ko: 'Registration Accept에서 MICO(Mobile Initiated Connection Only) 협상 → UE는 CM-IDLE 동안 페이징을 수신하지 않음 → MT 데이터/통화 도착 시 AMF가 페이징 억제, DL은 버퍼링만 → MT 도달불가(UE가 MO로 접속할 때까지). IoT PSM과 유사한 절전 트레이드오프.',
     desc_en: 'Registration Accept negotiates MICO (Mobile Initiated Connection Only) → UE does not monitor paging while CM-IDLE → on MT data/call, AMF suppresses paging and only buffers DL → UE unreachable for MT until it connects MO. Power-saving trade-off like IoT PSM.',
@@ -2137,7 +2138,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'NW Deregistration → UE 재등록', label_en: 'NW Deregistration → UE re-registers' }),
   },
   {
-    id: 'rnau-inactive',
+    id: 'rnau-inactive', simulable: true,
     ko: 'RRC_INACTIVE + RNAU', en: 'RRC_INACTIVE + RNAU', zh: 'RRC_INACTIVE + RNAU',
     desc_ko: 'gNB가 RRCRelease-with-suspend(I-RNTI, RNA, T380)로 UE를 RRC_INACTIVE 전환(5GC는 CM-CONNECTED 유지) → 주기적 RNAU(RAN Notification Area Update) 또는 데이터 발생 시 RRCResume로 빠른 재개. AN release/재설정 오버헤드 절감.',
     desc_en: 'gNB suspends UE to RRC_INACTIVE via RRCRelease-with-suspend (I-RNTI, RNA, T380) while 5GC stays CM-CONNECTED → periodic RNAU or RRCResume on data. Avoids AN release/re-setup overhead.',
@@ -2150,7 +2151,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'RRC_INACTIVE 전환 + RNAU/Resume', label_en: 'RRC_INACTIVE + RNAU/Resume' }),
   },
   {
-    id: 'guti-reallocation',
+    id: 'guti-reallocation', simulable: true,
     ko: '5G-GUTI 재배정 (Config Update)', en: '5G-GUTI reallocation (Config Update)', zh: '5G-GUTI 重分配 (配置更新)',
     desc_ko: 'AMF가 프라이버시/이동성 목적으로 Configuration Update Command(새 5G-GUTI, TAI-list, ack-requested, T3555) → UE가 Configuration Update Complete로 새 GUTI 채택. 기존 5G-S-TMSI 해제.',
     desc_en: 'For privacy/mobility, AMF sends Configuration Update Command (new 5G-GUTI, TAI-list, ack-requested, T3555) → UE replies Configuration Update Complete adopting the new GUTI; old 5G-S-TMSI released.',
@@ -2163,7 +2164,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: '5G-GUTI 재배정 성공 (Config Update Complete)', label_en: '5G-GUTI reallocation OK (Config Update Complete)' }),
   },
   {
-    id: 'mt-paging-ddn',
+    id: 'mt-paging-ddn', simulable: true,
     ko: 'MT 페이징 (DDN → Paging)', en: 'MT paging (DDN → Paging)', zh: 'MT 寻呼 (DDN → Paging)',
     desc_ko: 'CM-IDLE UE로 하향 데이터 도착 → UPF N4 Session Report(DLDR) → SMF → Namf N1N2MessageTransfer → AMF Paging(RAN paging area, T3513) → UE MT Service Request → 버퍼된 DL 데이터 전달. T3513 만료/무응답 시 MT 실패.',
     desc_en: 'DL data arrives for a CM-IDLE UE → UPF N4 Session Report (DLDR) → SMF → Namf N1N2MessageTransfer → AMF Paging (RAN paging area, T3513) → UE MT Service Request → buffered DL delivered. T3513 expiry/no answer → MT fails.',
@@ -3850,38 +3851,38 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'QNC NOT_GUARANTEED (GFBR 미충족)', label_en: 'QNC NOT_GUARANTEED (GFBR not met)' }),
   },
   {
-    id: 'smf-overload-503',
+    id: 'smf-overload-503', simulable: true,
     ko: 'SMF/SBI 과부하 (503+Retry-After)', en: 'SMF/SBI overload (503+Retry-After)', zh: 'SMF/SBI 过载 (503+Retry-After)',
-    desc_ko: 'SMF/SBI 과부하는 NGAP Overload가 아님 → HTTP 503 Service Unavailable + Retry-After로 흐름 제어(NGAP Overload는 AMF→gNB 전용).',
-    desc_en: 'SMF/SBI overload is NOT NGAP Overload → flow-controlled via HTTP 503 Service Unavailable + Retry-After (NGAP Overload is AMF→gNB only).',
-    desc_zh: 'SMF/SBI 过载不是 NGAP Overload → 用 HTTP 503 Service Unavailable + Retry-After 控流(NGAP Overload 仅 AMF→gNB)。',
-    ref: 'TS 29.500 §6.4 (503 + Retry-After) · TS 23.501 §5.19', cause: 'HTTP 503 + Retry-After (SBI overload)', domain: 'scale', category: 'failure',
+    desc_ko: 'SMF/SBI 과부하는 NGAP Overload가 아님 → HTTP 503 Service Unavailable + Retry-After로 흐름 제어(NGAP Overload는 AMF→gNB 전용). SMF 1파드(용량 10,000 세션)에 배후 세션 부하 11,000 → 110% 과부하(정직한 대규모 부하).',
+    desc_en: 'SMF/SBI overload is NOT NGAP Overload → flow-controlled via HTTP 503 Service Unavailable + Retry-After (NGAP Overload is AMF→gNB only). 1 SMF pod (capacity 10,000 sessions) with a background session load of 11,000 → 110% overload (honest mass load).',
+    desc_zh: 'SMF/SBI 过载不是 NGAP Overload → 用 HTTP 503 Service Unavailable + Retry-After 控流(NGAP Overload 仅 AMF→gNB)。1 个 SMF Pod(容量 10,000 会话)承载背景会话负载 11,000 → 110% 过载(诚实的大规模负载)。',
+    ref: 'TS 29.500 §6.4 (503 + Retry-After) · TS 23.501 §5.19', cause: 'HTTP 503 + Retry-After (SBI overload, SMF 11,000/10,000)', domain: 'scale', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'SMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 6 },
+      { op: 'nfParam', zone: 'A', nf: 'SMF', patch: { replicas: 1, max_replicas: 1, background_load_ue: 11000 } },
+      { op: 'ensurePersons', zone: 'A', count: 3 },
     ],
-    expect: () => ({ label_ko: 'SMF/SBI 과부하 → 503 + Retry-After', label_en: 'SMF/SBI overload → 503 + Retry-After' }),
+    expect: () => ({ label_ko: 'SMF 11,000/10,000 과부하 → 503 + Retry-After', label_en: 'SMF 11,000/10,000 overload → 503 + Retry-After' }),
   },
   {
-    id: 'upf-overload-oci',
+    id: 'upf-overload-oci', simulable: true,
     ko: 'UPF 과부하 (PFCP OCI)', en: 'UPF overload (PFCP OCI)', zh: 'UPF 过载 (PFCP OCI)',
-    desc_ko: 'UPF 과부하는 NGAP Overload가 아님 → PFCP Overload Control Information(OCI)로 SMF가 부하 저감(NGAP Overload는 AMF→gNB 전용).',
-    desc_en: 'UPF overload is NOT NGAP Overload → SMF throttles via PFCP Overload Control Information (OCI) (NGAP Overload is AMF→gNB only).',
-    desc_zh: 'UPF 过载不是 NGAP Overload → SMF 通过 PFCP Overload Control Information(OCI)降载(NGAP Overload 仅 AMF→gNB)。',
-    ref: 'TS 29.244 §5.22 (PFCP Overload Control) · TS 23.501 §5.19', cause: 'PFCP Overload Control (OCI)', domain: 'scale', category: 'failure',
+    desc_ko: 'UPF 과부하는 NGAP Overload가 아님 → PFCP Overload Control Information(OCI)로 SMF가 부하 저감(NGAP Overload는 AMF→gNB 전용). UPF 1파드(용량 5 Gbps)에 배후 가입자 12,000명(≈6 Gbps 환산) → 120% 과부하(정직한 대규모 부하).',
+    desc_en: 'UPF overload is NOT NGAP Overload → SMF throttles via PFCP Overload Control Information (OCI) (NGAP Overload is AMF→gNB only). 1 UPF pod (capacity 5 Gbps) with 12,000 background subscribers (≈6 Gbps) → 120% overload (honest mass load).',
+    desc_zh: 'UPF 过载不是 NGAP Overload → SMF 通过 PFCP Overload Control Information(OCI)降载(NGAP Overload 仅 AMF→gNB)。1 个 UPF Pod(容量 5 Gbps)承载 12,000 背景订户(≈6 Gbps)→ 120% 过载(诚实的大规模负载)。',
+    ref: 'TS 29.244 §5.22 (PFCP Overload Control) · TS 23.501 §5.19', cause: 'PFCP Overload Control (OCI, UPF ~120%)', domain: 'scale', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
       { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
       { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'nfParam', zone: 'A', nf: 'UPF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
-      { op: 'ensurePersons', zone: 'A', count: 6 },
+      { op: 'nfParam', zone: 'A', nf: 'UPF', patch: { replicas: 1, max_replicas: 1, background_load_ue: 12000 } },
+      { op: 'ensurePersons', zone: 'A', count: 3 },
     ],
-    expect: () => ({ label_ko: 'UPF 과부하 → PFCP OCI 저감', label_en: 'UPF overload → PFCP OCI throttling' }),
+    expect: () => ({ label_ko: 'UPF ~120% 과부하 → PFCP OCI 저감', label_en: 'UPF ~120% overload → PFCP OCI throttling' }),
   },
   // ════════ BULK D — IoT/RedCap/URLLC/mMTC 추가 ════════
   {
@@ -4176,7 +4177,7 @@ export const SCENARIOS: Scenario[] = [
     expect: () => ({ label_ko: 'Service Gap T3447 → MO 차단', label_en: 'Service Gap T3447 → MO blocked' }),
   },
   {
-    id: 'iot-nbiot-no-pdn',
+    id: 'iot-nbiot-no-pdn', simulable: true,
     ko: 'NB-IoT PDN 없는 attach', en: 'NB-IoT attach without PDN', zh: 'NB-IoT 无 PDN 附着',
     desc_ko: 'CIoT attach without PDN → RM-REGISTERED, PDN 연결 없음(SMS/NIDD 전용).',
     desc_en: 'CIoT attach without PDN → RM-REGISTERED, no PDN connection (SMS/NIDD only).',

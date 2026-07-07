@@ -98,7 +98,9 @@ function NumOpt({
   )
 }
 
-function GnbParamsEditor({ obj }: { obj: SceneObject }) {
+// ── RU / RF·PHY-low: RF 프론트엔드 + 안테나 + 전파환경 (TS 38.401 · O-RAN 기능분할) ──
+// 모든 필드는 여전히 RU(gnb) 오브젝트에 저장된다(updateGnb) — "어느 편집기가 어느 필드를 보여주는가"만 재배치.
+export function GnbRfFields({ obj }: { obj: SceneObject }) {
   const t = useT()
   const lang = useStore((s) => s.lang)
   const objects = useStore((s) => s.objects)
@@ -112,9 +114,6 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
   const feeder =
     rad && rad.feeder_len > 0 ? feederLossDb(rad.feeder_len, g.freq_mhz, rad.cable) : 0
 
-  // FR 판정: NR은 실제 캐리어 주파수(≥24.25GHz=FR2)로 판정, LTE는 항상 FR1.
-  // (n257 같은 mmWave 주파수를 고르면 즉시 FR2 SCS가 뜨도록 band_class가 아닌 freq 기준으로.)
-  const fr = g.radio_tech === 'nr' ? frOfFreq(g.freq_mhz) : 'FR1'
   // 주파수 변경 시: FR에 맞춰 SCS 스냅 + band_class 동기화.
   const setFreq = (v: number) => {
     const nf = frOfFreq(v)
@@ -126,17 +125,10 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
       ...(validScsForFr(nf).includes(g.scs_khz) ? {} : { scs_khz: defaultScsForFr(nf) }),
     })
   }
-  const validScs = validScsForFr(fr)
-  // 무효한 (밴드, SCS) 조합이면 FR 기본값으로 스냅 (저장 데이터/외부 변경 방어).
-  useEffect(() => {
-    if (!validScs.includes(g.scs_khz)) {
-      updateGnb(obj.id, { scs_khz: defaultScsForFr(fr) })
-    }
-  }, [fr, g.scs_khz, obj.id, updateGnb, validScs])
 
   return (
     <>
-      <div className="section-label">{t('radio_params')}</div>
+      <div className="section-label">RU · {pick(lang, 'RF/안테나', 'RF/Antenna', 'RF/天线')}</div>
       {/* 전파 송출 On/Off — 가장 눈에 띄게(컬러 pill) 최상단에 배치 (item 6). g.enabled와 연동 */}
       <div
         className="field"
@@ -280,66 +272,9 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
       <Num label={t('tx_power')} unit="dBm" value={g.tx_power_dbm} min={-30} max={80} step={1}
         title={pick(lang, '송신 출력 — 높이면 커버리지↑ 그러나 인접셀 간섭↑', 'Transmit power — higher extends coverage but raises inter-cell interference', '发射功率 — 提高可扩大覆盖但增加邻区干扰')}
         onChange={(v) => updateGnb(obj.id, { tx_power_dbm: v })} />
-      <Num label={pick(lang, '최대 접속 UE', 'Max UEs', '最大接入UE')} unit="UE" value={g.max_ue} min={1} max={10000} step={1}
-        title={pick(lang, '이 셀이 동시에 수용하는 최대 단말 수 (초과 시 접속 거부/혼잡)', 'Max UEs this cell admits at once (excess → admission reject/congestion)', '此小区同时接入的最大终端数 (超出则拒绝接入/拥塞)')}
-        onChange={(v) => updateGnb(obj.id, { max_ue: Math.round(v) })} />
-      <Num label="PCI" unit="0-1007" value={g.pci} min={0} max={1007} step={1}
-        title={pick(lang, '물리 셀 식별자 — 인접셀과 mod-3/mod-30 충돌 시 간섭 발생', 'Physical Cell ID — mod-3/mod-30 clashes with neighbors cause interference', '物理小区标识 — 与邻区mod-3/mod-30冲突会产生干扰')}
-        onChange={(v) => updateGnb(obj.id, { pci: Math.round(v) })} />
-      <Num label="TAC" unit="" value={g.tac} min={0} max={16777215} step={1}
-        title={pick(lang, '추적 영역 코드 — 페이징/등록 영역 구분 (경계에서 TAU 발생)', 'Tracking Area Code — defines paging/registration area (TAU at borders)', '跟踪区码 — 划分寻呼/注册区域 (边界触发TAU)')}
-        onChange={(v) => updateGnb(obj.id, { tac: Math.round(v) })} />
-      {/* SIB1 cellBarred — 이 셀 캠핑 불가(무서비스), UE 재선택. TS 38.331/38.304 */}
-      <label className="field checkbox" title={pick(lang,
-        'SIB1 cellBarred=barred — 이 셀 캠핑 불가(무서비스), UE는 재선택. 표준: TS 38.331/38.304.',
-        'SIB1 cellBarred=barred — UE cannot camp on this cell (no service) and reselects. Std: TS 38.331/38.304.',
-        'SIB1 cellBarred=barred — UE 无法驻留此小区(无服务)并重选。标准: TS 38.331/38.304.')}>
-        <span>{pick(lang, '셀 접속 차단 (cell barred)', 'Cell barred', '小区禁止接入 (cell barred)')}</span>
-        <input type="checkbox" checked={g.cell_barred ?? false}
-          onChange={(e) => updateGnb(obj.id, { cell_barred: e.target.checked })} />
-      </label>
-      <Num label={pick(lang, 'Qrxlevmin (셀선택 최소수신)', 'Qrxlevmin (min RX for cell selection)', 'Qrxlevmin (小区选择最小接收)')}
-        unit="dBm" value={g.q_rx_lev_min_dbm ?? -120} min={-140} max={-30} step={1}
-        title={pick(lang,
-          "셀선택 S-기준 최소 RSRP(Qrxlevmin). 측정 RSRP가 이 값보다 낮으면(Srxlev<0) '적합 셀 없음(No Suitable Cell)'로 접속 불가. 표준: TS 38.304.",
-          "Minimum RSRP for cell selection S-criterion (Qrxlevmin). If measured RSRP is below this (Srxlev<0) → 'No Suitable Cell' and access is blocked. Std: TS 38.304.",
-          "小区选择S准则最小RSRP(Qrxlevmin)。测量RSRP低于此值(Srxlev<0)则'无合适小区(No Suitable Cell)'无法接入。标准: TS 38.304.")}
-        onChange={(v) => updateGnb(obj.id, { q_rx_lev_min_dbm: v })} />
-      <label className="field" title={pick(lang, '부반송파 간격(SCS) — FR에 따라 유효값 제한 (FR1:15/30/60, FR2:60/120)', 'Subcarrier spacing — valid values depend on FR (FR1:15/30/60, FR2:60/120)', '子载波间隔 — 有效值取决于FR (FR1:15/30/60, FR2:60/120)')}>
-        <span>SCS <em>(kHz · {fr})</em></span>
-        <select value={validScs.includes(g.scs_khz) ? g.scs_khz : defaultScsForFr(fr)}
-          onChange={(e) => updateGnb(obj.id, { scs_khz: parseInt(e.target.value) as 15 | 30 | 60 | 120 })}>
-          {validScs.map((s) => (
-            <option key={s} value={s}>{s} ({fr})</option>
-          ))}
-        </select>
-      </label>
-      <Num label={pick(lang, 'TDD DL 비율', 'TDD DL ratio', 'TDD DL比例')} unit="0~1" value={g.tdd_dl_ratio}
-        min={0.1} max={0.9} step={0.05}
-        onChange={(v) => updateGnb(obj.id, { tdd_dl_ratio: v })} />
-      <label className="field checkbox drx-center" title={pick(lang, '불연속 수신(DRX) — 단말 배터리 절감(주기적 수신 슬립)', 'Discontinuous Reception — saves UE battery via periodic sleep', '非连续接收(DRX) — 通过周期休眠节省终端电量')}>
-        <span>DRX</span>
-        <input type="checkbox" checked={g.drx}
-          onChange={(e) => updateGnb(obj.id, { drx: e.target.checked })} />
-      </label>
-
-      <div className="section-label sub-bold">{pick(lang, 'PRACH / UL 전력', 'PRACH / UL power', 'PRACH / UL功率')}</div>
+      <div className="section-label sub-bold">{pick(lang, 'PRACH 프리앰블 (RF)', 'PRACH preamble (RF)', 'PRACH 前导 (RF)')}</div>
       <Num label="PRACH target" unit="dBm" value={g.prach_power_dbm} min={-130} max={-80} step={1}
         onChange={(v) => updateGnb(obj.id, { prach_power_dbm: v })} />
-      <Num label={pick(lang, '램핑 스텝', 'ramp step', '功率爬升步长')} unit="dB" value={g.prach_ramp_step_db} min={0} max={6} step={0.5}
-        onChange={(v) => updateGnb(obj.id, { prach_ramp_step_db: v })} />
-      <Num label={pick(lang, '최대 재시도', 'max tx', '最大重传')} unit="회" value={g.prach_max_tx} min={1} max={200} step={1}
-        onChange={(v) => updateGnb(obj.id, { prach_max_tx: Math.round(v) })} />
-      <Num label="P0-nominal" unit="dBm" value={g.p0_nominal_dbm} min={-120} max={-60} step={1}
-        onChange={(v) => updateGnb(obj.id, { p0_nominal_dbm: v })} />
-      <Num label="alpha" unit="0~1" value={g.alpha} min={0} max={1} step={0.1}
-        onChange={(v) => updateGnb(obj.id, { alpha: v })} />
-      <div className="material-note">
-        {pick(lang,
-          'UL 링크버짓 부족 시 PRACH 접속 실패(걷기 모드 로그). P0/alpha를 높이면 셀 외곽 UL 커버리지가 개선됩니다.',
-          'Weak UL link budget → PRACH failure. Raise P0/alpha to improve cell-edge UL coverage.',
-          'UL链路预算不足时PRACH接入失败(行走模式日志)。提高P0/alpha可改善小区边缘UL覆盖。')}
-      </div>
       <Num label={t('bandwidth')} unit="MHz" value={g.bandwidth_mhz} min={1} max={2000} step={5}
         onChange={(v) => updateGnb(obj.id, { bandwidth_mhz: v })} />
       <Num label={t('ant_height')} unit="m" value={g.height} min={0.1} max={50} step={0.1}
@@ -378,6 +313,115 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
           {g.freq_mhz < 24250 && <div className="material-note">{t('beam_note')}</div>}
         </>
       )}
+      <Num label={pick(lang, '안테나 어레이 행 (rows)', 'Antenna array rows', '天线阵列行 (rows)')}
+        unit="rows" value={g.ant_rows ?? 1} min={1} max={8} step={1}
+        title={pick(lang,
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
+        onChange={(v) => updateGnb(obj.id, { ant_rows: Math.round(v) })} />
+      <Num label={pick(lang, '안테나 어레이 열 (cols)', 'Antenna array cols', '天线阵列列 (cols)')}
+        unit="cols" value={g.ant_cols ?? 1} min={1} max={8} step={1}
+        title={pick(lang,
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
+        onChange={(v) => updateGnb(obj.id, { ant_cols: Math.round(v) })} />
+      <label className="field checkbox" title={pick(lang, '에너지 절감 — 저부하 시 셀 출력/자원 절약', 'Energy saving — trims cell power/resources under low load', '节能 — 低负载时节省小区功率/资源')}>
+        <span>{t('feat_es')}</span>
+        <input type="checkbox" checked={g.energy_saving}
+          onChange={(e) => updateGnb(obj.id, { energy_saving: e.target.checked })} />
+      </label>
+      {/* per-cell RF 수신기 오버라이드 (TS 38.104/38.214). 비우면 전역 RF 기본값 폴백. */}
+      <div className="section-label sub-bold">
+        📡 {pick(lang,
+          'RF 수신 (per-cell override)',
+          'RF reception (per-cell override)',
+          'RF 接收 (per-cell 覆盖)')}
+      </div>
+      <div className="material-note">
+        {pick(lang,
+          '미입력 시 전역 RF 기본값 사용 (TS 38.104/38.214).',
+          'Empty = global RF default (TS 38.104/38.214).',
+          '留空则使用全局RF默认值 (TS 38.104/38.214)。')}
+      </div>
+      <NumOpt label={pick(lang, '잡음 지수 (NF)', 'Noise figure (NF)', '噪声系数 (NF)')} unit="dB" value={g.noise_figure_db} min={0} max={15} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '수신기 잡음 지수 — 클수록 잡음 바닥↑·SINR↓·커버리지↓. 미입력 시 전역값. TS 38.104.', 'Receiver noise figure — higher raises noise floor, lowers SINR/coverage. Empty = global. TS 38.104.', '接收机噪声系数 — 越大噪声基底越高，SINR/覆盖越低。留空=全局。TS 38.104。')}
+        onChange={(v) => updateGnb(obj.id, { noise_figure_db: v })} />
+      <NumOpt label={pick(lang, '목표 BLER', 'Target BLER', '目标BLER')} unit="0~1" value={g.target_bler} min={0.001} max={0.5} step={0.01}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '링크 적응 목표 BLER(초기송신, 통상 0.1). 낮출수록 견고·처리량↓. 미입력 시 전역값. TS 38.214.', 'Link-adaptation target BLER (initial tx, typ. 0.1). Lower = more robust but lower throughput. Empty = global. TS 38.214.', '链路自适应目标BLER(初传，通常0.1)。越低越稳健但吞吐越低。留空=全局。TS 38.214。')}
+        onChange={(v) => updateGnb(obj.id, { target_bler: v })} />
+      <NumOpt label={pick(lang, '간섭 마진', 'Interference margin', '干扰余量')} unit="dB" value={g.interference_margin_db} min={0} max={20} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '링크버짓 간섭 마진 — 셀 부하/인접셀 간섭 여유(클수록 유효 SINR↓). 미입력 시 전역값. TS 38.214.', 'Link-budget interference margin — headroom for cell load/inter-cell interference (higher lowers effective SINR). Empty = global. TS 38.214.', '链路预算干扰余量 — 小区负载/邻区干扰余量(越大有效SINR越低)。留空=全局。TS 38.214。')}
+        onChange={(v) => updateGnb(obj.id, { interference_margin_db: v })} />
+
+      {/* per-cell 전파환경 오버라이드 (TR 38.901 / TS 38.101-1). 비우면 전역 RF 기본값 폴백. */}
+      <div className="section-label sub-bold">
+        🌐 {pick(lang,
+          '전파환경 (per-cell)',
+          'Propagation (per-cell)',
+          '传播环境 (per-cell)')}
+      </div>
+      <NumOpt label={pick(lang, '경로손실 지수 n', 'Path-loss exponent n', '路径损耗指数 n')} unit="n" value={g.path_loss_exp} min={1.5} max={6} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '경로손실 지수 n (셀 국소 환경, TR 38.901). 미입력=전역', 'Path-loss exponent n (cell-local environment, TR 38.901). Empty = global.', '路径损耗指数 n (小区局部环境, TR 38.901)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { path_loss_exp: v })} />
+      <NumOpt label={pick(lang, '쉐도우 페이딩 σ', 'Shadow fading σ', '阴影衰落 σ')} unit="dB" value={g.shadow_sigma_db} min={0} max={12} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '쉐도우 페이딩 σ (셀 국소, TR 38.901). 미입력=전역', 'Shadow fading σ (cell-local, TR 38.901). Empty = global.', '阴影衰落 σ (小区局部, TR 38.901)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { shadow_sigma_db: v })} />
+      <NumOpt label={pick(lang, 'UE 최대 송신출력 Pmax', 'UE max Tx power Pmax', 'UE 最大发射功率 Pmax')} unit="dBm" value={g.ue_pmax_dbm} min={0} max={33} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '이 셀 가정 UE 최대 송신출력 Pmax (UL 링크버짓, TS 38.101-1). 미입력=전역', 'Assumed UE max Tx power Pmax for this cell (UL link budget, TS 38.101-1). Empty = global.', '本小区假定UE最大发射功率Pmax (UL链路预算, TS 38.101-1)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { ue_pmax_dbm: v })} />
+    </>
+  )
+}
+
+// ── DU / RLC·MAC·PHY-high & 스케줄링·수비학 (TS 38.401 · O-RAN 기능분할) ──
+// DU 편집기는 자신에게 연결된 RU(들)의 gnb 필드를 편집한다(데이터는 RU에 저장).
+export function GnbDuFields({ obj }: { obj: SceneObject }) {
+  const t = useT()
+  const lang = useStore((s) => s.lang)
+  const updateGnb = useStore((s) => s.updateGnb)
+  const g = obj.gnb!
+  // FR 판정: NR은 실제 캐리어 주파수(≥24.25GHz=FR2)로 판정, LTE는 항상 FR1.
+  const fr = g.radio_tech === 'nr' ? frOfFreq(g.freq_mhz) : 'FR1'
+  const validScs = validScsForFr(fr)
+  // 무효한 (밴드, SCS) 조합이면 FR 기본값으로 스냅 (저장 데이터/외부 변경 방어).
+  useEffect(() => {
+    if (!validScs.includes(g.scs_khz)) {
+      updateGnb(obj.id, { scs_khz: defaultScsForFr(fr) })
+    }
+  }, [fr, g.scs_khz, obj.id, updateGnb, validScs])
+
+  return (
+    <>
+      <div className="section-label">DU · {pick(lang, '스케줄링/RLC·MAC/수비학', 'Scheduling/RLC·MAC/Numerology', '调度/RLC·MAC/数字学')}</div>
+      <label className="field" title={pick(lang, '부반송파 간격(SCS) — FR에 따라 유효값 제한 (FR1:15/30/60, FR2:60/120)', 'Subcarrier spacing — valid values depend on FR (FR1:15/30/60, FR2:60/120)', '子载波间隔 — 有效值取决于FR (FR1:15/30/60, FR2:60/120)')}>
+        <span>SCS <em>(kHz · {fr})</em></span>
+        <select value={validScs.includes(g.scs_khz) ? g.scs_khz : defaultScsForFr(fr)}
+          onChange={(e) => updateGnb(obj.id, { scs_khz: parseInt(e.target.value) as 15 | 30 | 60 | 120 })}>
+          {validScs.map((s) => (
+            <option key={s} value={s}>{s} ({fr})</option>
+          ))}
+        </select>
+      </label>
+      <Num label={pick(lang, 'TDD DL 비율', 'TDD DL ratio', 'TDD DL比例')} unit="0~1" value={g.tdd_dl_ratio}
+        min={0.1} max={0.9} step={0.05}
+        onChange={(v) => updateGnb(obj.id, { tdd_dl_ratio: v })} />
+      <Num label={pick(lang, '최대 접속 UE', 'Max UEs', '最大接入UE')} unit="UE" value={g.max_ue} min={1} max={10000} step={1}
+        title={pick(lang, '이 셀이 동시에 수용하는 최대 단말 수 (초과 시 접속 거부/혼잡)', 'Max UEs this cell admits at once (excess → admission reject/congestion)', '此小区同时接入的最大终端数 (超出则拒绝接入/拥塞)')}
+        onChange={(v) => updateGnb(obj.id, { max_ue: Math.round(v) })} />
+      <Num label="PCI" unit="0-1007" value={g.pci} min={0} max={1007} step={1}
+        title={pick(lang, '물리 셀 식별자 — 인접셀과 mod-3/mod-30 충돌 시 간섭 발생', 'Physical Cell ID — mod-3/mod-30 clashes with neighbors cause interference', '物理小区标识 — 与邻区mod-3/mod-30冲突会产生干扰')}
+        onChange={(v) => updateGnb(obj.id, { pci: Math.round(v) })} />
+      <Num label="TAC" unit="" value={g.tac} min={0} max={16777215} step={1}
+        title={pick(lang, '추적 영역 코드 — 페이징/등록 영역 구분 (경계에서 TAU 발생)', 'Tracking Area Code — defines paging/registration area (TAU at borders)', '跟踪区码 — 划分寻呼/注册区域 (边界触发TAU)')}
+        onChange={(v) => updateGnb(obj.id, { tac: Math.round(v) })} />
       <div className="section-label">{t('ran_features')}</div>
       <label className="field checkbox" title={pick(lang, '캐리어 집성(CA) — 여러 주파수 묶어 속도↑ (PCell+SCell)', 'Carrier Aggregation — bond carriers for higher rate (PCell+SCell)', '载波聚合(CA) — 绑定多载波提速 (PCell+SCell)')}>
         <span>{t('feat_ca')}</span>
@@ -394,7 +438,7 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
         <input type="checkbox" checked={g.mimo4x4}
           onChange={(e) => updateGnb(obj.id, { mimo4x4: e.target.checked })} />
       </label>
-      {/* MIMO 레이어/랭크 + 안테나 어레이 (rows×cols) — mimo4x4 토글을 대체하는 상세 RF 파라미터 */}
+      {/* MIMO 레이어/랭크 — mimo4x4 토글을 대체하는 상세 스케줄링 파라미터 */}
       <Num label={pick(lang, 'MIMO 레이어 (layers/rank)', 'MIMO layers (rank)', 'MIMO层数 (rank)')}
         unit="layers" value={g.mimo_layers ?? 2} min={1} max={8} step={1}
         title={pick(lang,
@@ -402,37 +446,87 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
           'DL 공간 레이어/랭크 수. 높을수록 피크 처리량 비례 증가(랭크 상한 8). TS 38.211/214. (mimo4x4 토글 대체)',
           'DL 공간 레이어/랭크 수. 높을수록 피크 처리량 비례 증가(랭크 상한 8). TS 38.211/214. (mimo4x4 토글 대체)')}
         onChange={(v) => updateGnb(obj.id, { mimo_layers: Math.round(v) })} />
-      <Num label={pick(lang, '안테나 어레이 행 (rows)', 'Antenna array rows', '天线阵列行 (rows)')}
-        unit="rows" value={g.ant_rows ?? 1} min={1} max={8} step={1}
-        title={pick(lang,
-          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
-          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
-          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
-        onChange={(v) => updateGnb(obj.id, { ant_rows: Math.round(v) })} />
-      <Num label={pick(lang, '안테나 어레이 열 (cols)', 'Antenna array cols', '天线阵列列 (cols)')}
-        unit="cols" value={g.ant_cols ?? 1} min={1} max={8} step={1}
-        title={pick(lang,
-          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
-          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
-          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
-        onChange={(v) => updateGnb(obj.id, { ant_cols: Math.round(v) })} />
       <div className="material-note">
         {pick(lang,
           'mimo4x4 토글은 레거시(하위호환용 유지) — 실제 처리량은 위 MIMO 레이어 수로 결정됩니다.',
           'mimo4x4 toggle is legacy (kept for back-compat) — throughput now follows the MIMO layers above.',
           'mimo4x4 开关为旧版(为向后兼容保留) — 吞吐量现由上方MIMO层数决定。')}
       </div>
-      <label className="field checkbox" title={pick(lang, '에너지 절감 — 저부하 시 셀 출력/자원 절약', 'Energy saving — trims cell power/resources under low load', '节能 — 低负载时节省小区功率/资源')}>
-        <span>{t('feat_es')}</span>
-        <input type="checkbox" checked={g.energy_saving}
-          onChange={(e) => updateGnb(obj.id, { energy_saving: e.target.checked })} />
+      <div className="material-note">{t('feat_note')}</div>
+      <div className="section-label sub-bold">{pick(lang, 'UL 전력제어 / RACH', 'UL power control / RACH', 'UL功率控制 / RACH')}</div>
+      <Num label={pick(lang, '램핑 스텝', 'ramp step', '功率爬升步长')} unit="dB" value={g.prach_ramp_step_db} min={0} max={6} step={0.5}
+        onChange={(v) => updateGnb(obj.id, { prach_ramp_step_db: v })} />
+      <Num label={pick(lang, '최대 재시도', 'max tx', '最大重传')} unit="회" value={g.prach_max_tx} min={1} max={200} step={1}
+        onChange={(v) => updateGnb(obj.id, { prach_max_tx: Math.round(v) })} />
+      <Num label="P0-nominal" unit="dBm" value={g.p0_nominal_dbm} min={-120} max={-60} step={1}
+        onChange={(v) => updateGnb(obj.id, { p0_nominal_dbm: v })} />
+      <Num label="alpha" unit="0~1" value={g.alpha} min={0} max={1} step={0.1}
+        onChange={(v) => updateGnb(obj.id, { alpha: v })} />
+      <div className="material-note">
+        {pick(lang,
+          'UL 링크버짓 부족 시 PRACH 접속 실패(걷기 모드 로그). P0/alpha를 높이면 셀 외곽 UL 커버리지가 개선됩니다.',
+          'Weak UL link budget → PRACH failure. Raise P0/alpha to improve cell-edge UL coverage.',
+          'UL链路预算不足时PRACH接入失败(行走模式日志)。提高P0/alpha可改善小区边缘UL覆盖。')}
+      </div>
+      {/* RACH/RLC/브로드캐스트 per-cell 오버라이드 (미입력 시 전역값). TS 38.331/38.322. */}
+      <div className="section-label sub-bold">{pick(lang, 'RACH/RLC/브로드캐스트 (per-cell override)', 'RACH/RLC/Broadcast (per-cell override)', 'RACH/RLC/广播 (per-cell 覆盖)')}</div>
+      <NumOpt label="RA response window" unit="ms" value={g.ra_response_window_ms} min={1} max={80} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'ra-ResponseWindow: RAR 수신 대기 윈도우. 미입력 시 전역값. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR reception window. Empty = global. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR接收窗口。留空=全局。TS 38.331 §6.3.2。')}
+        onChange={(v) => updateGnb(obj.id, { ra_response_window_ms: v })} />
+      <NumOpt label="RLC maxRetxThreshold" unit="회" value={g.rlc_max_retx} min={1} max={64} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'maxRetxThreshold: RLC AM 최대 재전송(초과 시 RLF). 미입력 시 전역값. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM max retransmissions (exceed → RLF). Empty = global. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM最大重传(超过→RLF)。留空=全局。TS 38.322/38.331。')}
+        onChange={(v) => updateGnb(obj.id, { rlc_max_retx: v == null ? undefined : Math.round(v) })} />
+      <NumOpt label="SSB periodicity" unit="ms" value={g.ssb_periodicity_ms} min={5} max={160} step={5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'ssb-PeriodicityServingCell: SSB 버스트 주기(5/10/20/40/80/160). 미입력 시 전역값. TS 38.331.', 'ssb-PeriodicityServingCell: SSB burst period (5/10/20/40/80/160). Empty = global. TS 38.331.', 'ssb-PeriodicityServingCell: SSB突发周期(5/10/20/40/80/160)。留空=全局。TS 38.331。')}
+        onChange={(v) => updateGnb(obj.id, { ssb_periodicity_ms: v })} />
+      <NumOpt label="SIB1 periodicity" unit="ms" value={g.sib1_periodicity_ms} min={5} max={160} step={5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'SIB1 반복 주기(기본 20ms). 미입력 시 전역값. TS 38.331 §5.2.2.', 'SIB1 repetition period (default 20ms). Empty = global. TS 38.331 §5.2.2.', 'SIB1重复周期(默认20ms)。留空=全局。TS 38.331 §5.2.2。')}
+        onChange={(v) => updateGnb(obj.id, { sib1_periodicity_ms: v })} />
+    </>
+  )
+}
+
+// ── CU / RRC & PDCP: 이동성·측정·SIB1·PDCP (TS 38.401 · O-RAN 기능분할) ──
+// CU 편집기는 자신 하위(연결된 DU들)의 RU(들)의 gnb 필드를 편집한다(데이터는 RU에 저장).
+export function GnbCuFields({ obj }: { obj: SceneObject }) {
+  const t = useT()
+  const lang = useStore((s) => s.lang)
+  const updateGnb = useStore((s) => s.updateGnb)
+  const g = obj.gnb!
+
+  return (
+    <>
+      <div className="section-label">CU · {pick(lang, 'RRC/이동성/PDCP', 'RRC/Mobility/PDCP', 'RRC/移动性/PDCP')}</div>
+      {/* SIB1 cellBarred — 이 셀 캠핑 불가(무서비스), UE 재선택. TS 38.331/38.304 */}
+      <label className="field checkbox" title={pick(lang,
+        'SIB1 cellBarred=barred — 이 셀 캠핑 불가(무서비스), UE는 재선택. 표준: TS 38.331/38.304.',
+        'SIB1 cellBarred=barred — UE cannot camp on this cell (no service) and reselects. Std: TS 38.331/38.304.',
+        'SIB1 cellBarred=barred — UE 无法驻留此小区(无服务)并重选。标准: TS 38.331/38.304.')}>
+        <span>{pick(lang, '셀 접속 차단 (cell barred)', 'Cell barred', '小区禁止接入 (cell barred)')}</span>
+        <input type="checkbox" checked={g.cell_barred ?? false}
+          onChange={(e) => updateGnb(obj.id, { cell_barred: e.target.checked })} />
+      </label>
+      <Num label={pick(lang, 'Qrxlevmin (셀선택 최소수신)', 'Qrxlevmin (min RX for cell selection)', 'Qrxlevmin (小区选择最小接收)')}
+        unit="dBm" value={g.q_rx_lev_min_dbm ?? -120} min={-140} max={-30} step={1}
+        title={pick(lang,
+          "셀선택 S-기준 최소 RSRP(Qrxlevmin). 측정 RSRP가 이 값보다 낮으면(Srxlev<0) '적합 셀 없음(No Suitable Cell)'로 접속 불가. 표준: TS 38.304.",
+          "Minimum RSRP for cell selection S-criterion (Qrxlevmin). If measured RSRP is below this (Srxlev<0) → 'No Suitable Cell' and access is blocked. Std: TS 38.304.",
+          "小区选择S准则最小RSRP(Qrxlevmin)。测量RSRP低于此值(Srxlev<0)则'无合适小区(No Suitable Cell)'无法接入。标准: TS 38.304.")}
+        onChange={(v) => updateGnb(obj.id, { q_rx_lev_min_dbm: v })} />
+      <label className="field checkbox drx-center" title={pick(lang, '불연속 수신(DRX) — 단말 배터리 절감(주기적 수신 슬립)', 'Discontinuous Reception — saves UE battery via periodic sleep', '非连续接收(DRX) — 通过周期休眠节省终端电量')}>
+        <span>DRX</span>
+        <input type="checkbox" checked={g.drx}
+          onChange={(e) => updateGnb(obj.id, { drx: e.target.checked })} />
       </label>
       <label className="field checkbox" title={pick(lang, 'PDCP 복제 — 같은 패킷을 두 경로로 보내 신뢰성↑ (URLLC)', 'PDCP duplication — send packet over two paths for reliability (URLLC)', 'PDCP复制 — 双路径发送同一包提升可靠性 (URLLC)')}>
         <span>{t('feat_pdcp')}</span>
         <input type="checkbox" checked={g.pdcp_duplication ?? false}
           onChange={(e) => updateGnb(obj.id, { pdcp_duplication: e.target.checked })} />
       </label>
-      <div className="material-note">{t('feat_note')}</div>
 
       {/* PART 9: RU별 이동성(A3 이벤트) — Core 패널의 '이동성 일괄 설정'으로도 일괄 적용됨 */}
       <div className="section-label sub-bold">
@@ -514,22 +608,6 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
         placeholder={pick(lang, '전역값', 'global', '全局')}
         title={pick(lang, 'N311: 연속 in-sync 지시 횟수(초과 시 T310 정지). 미입력 시 전역값. TS 38.331 §7.1.', 'N311: consecutive in-sync count (exceed → stop T310). Empty = global. TS 38.331 §7.1.', 'N311: 连续同步指示计数(超过→停止T310)。留空=全局。TS 38.331 §7.1。')}
         onChange={(v) => updateGnb(obj.id, { n311: v == null ? undefined : Math.round(v) })} />
-      <NumOpt label="RA response window" unit="ms" value={g.ra_response_window_ms} min={1} max={80} step={1}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, 'ra-ResponseWindow: RAR 수신 대기 윈도우. 미입력 시 전역값. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR reception window. Empty = global. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR接收窗口。留空=全局。TS 38.331 §6.3.2。')}
-        onChange={(v) => updateGnb(obj.id, { ra_response_window_ms: v })} />
-      <NumOpt label="RLC maxRetxThreshold" unit="회" value={g.rlc_max_retx} min={1} max={64} step={1}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, 'maxRetxThreshold: RLC AM 최대 재전송(초과 시 RLF). 미입력 시 전역값. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM max retransmissions (exceed → RLF). Empty = global. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM最大重传(超过→RLF)。留空=全局。TS 38.322/38.331。')}
-        onChange={(v) => updateGnb(obj.id, { rlc_max_retx: v == null ? undefined : Math.round(v) })} />
-      <NumOpt label="SSB periodicity" unit="ms" value={g.ssb_periodicity_ms} min={5} max={160} step={5}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, 'ssb-PeriodicityServingCell: SSB 버스트 주기(5/10/20/40/80/160). 미입력 시 전역값. TS 38.331.', 'ssb-PeriodicityServingCell: SSB burst period (5/10/20/40/80/160). Empty = global. TS 38.331.', 'ssb-PeriodicityServingCell: SSB突发周期(5/10/20/40/80/160)。留空=全局。TS 38.331。')}
-        onChange={(v) => updateGnb(obj.id, { ssb_periodicity_ms: v })} />
-      <NumOpt label="SIB1 periodicity" unit="ms" value={g.sib1_periodicity_ms} min={5} max={160} step={5}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, 'SIB1 반복 주기(기본 20ms). 미입력 시 전역값. TS 38.331 §5.2.2.', 'SIB1 repetition period (default 20ms). Empty = global. TS 38.331 §5.2.2.', 'SIB1重复周期(默认20ms)。留空=全局。TS 38.331 §5.2.2。')}
-        onChange={(v) => updateGnb(obj.id, { sib1_periodicity_ms: v })} />
       <NumOpt label="L3 filter coefficient k" unit="k" value={g.filter_coef_k} min={0} max={19} step={1}
         placeholder={pick(lang, '전역값', 'global', '全局')}
         title={pick(lang, 'filterCoefficient k: L3 측정 필터 계수(가중치 1/2^(k/4)). 클수록 평활↑·반응↓. 미입력 시 전역값. TS 38.331 §5.5.3.2.', 'filterCoefficient k: L3 measurement filter coeff (weight 1/2^(k/4)); higher = smoother/slower. Empty = global. TS 38.331 §5.5.3.2.', 'filterCoefficient k: L3测量滤波系数(权重1/2^(k/4))；越大越平滑越慢。留空=全局。TS 38.331 §5.5.3.2。')}
@@ -554,52 +632,18 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
         placeholder={pick(lang, '전역값', 'global', '全局')}
         title={pick(lang, 'Measurement Gap Length — 갭당 측정 시간(길수록 처리량 손실↑). 미입력 시 전역값. TS 38.133 §9.1.', 'Measurement Gap Length — per-gap measurement time (longer = more throughput loss). Empty = global. TS 38.133 §9.1.', '测量间隙长度 — 每间隙测量时间(越长吞吐损失越大)。留空=全局。TS 38.133 §9.1。')}
         onChange={(v) => updateGnb(obj.id, { gap_length_ms: v })} />
+    </>
+  )
+}
 
-      {/* per-cell RF 수신기 오버라이드 (TS 38.104/38.214). 비우면 전역 RF 기본값 폴백. */}
-      <div className="section-label sub-bold">
-        📡 {pick(lang,
-          'RF 수신 (per-cell override)',
-          'RF reception (per-cell override)',
-          'RF 接收 (per-cell 覆盖)')}
-      </div>
-      <div className="material-note">
-        {pick(lang,
-          '미입력 시 전역 RF 기본값 사용 (TS 38.104/38.214).',
-          'Empty = global RF default (TS 38.104/38.214).',
-          '留空则使用全局RF默认值 (TS 38.104/38.214)。')}
-      </div>
-      <NumOpt label={pick(lang, '잡음 지수 (NF)', 'Noise figure (NF)', '噪声系数 (NF)')} unit="dB" value={g.noise_figure_db} min={0} max={15} step={0.1}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '수신기 잡음 지수 — 클수록 잡음 바닥↑·SINR↓·커버리지↓. 미입력 시 전역값. TS 38.104.', 'Receiver noise figure — higher raises noise floor, lowers SINR/coverage. Empty = global. TS 38.104.', '接收机噪声系数 — 越大噪声基底越高，SINR/覆盖越低。留空=全局。TS 38.104。')}
-        onChange={(v) => updateGnb(obj.id, { noise_figure_db: v })} />
-      <NumOpt label={pick(lang, '목표 BLER', 'Target BLER', '目标BLER')} unit="0~1" value={g.target_bler} min={0.001} max={0.5} step={0.01}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '링크 적응 목표 BLER(초기송신, 통상 0.1). 낮출수록 견고·처리량↓. 미입력 시 전역값. TS 38.214.', 'Link-adaptation target BLER (initial tx, typ. 0.1). Lower = more robust but lower throughput. Empty = global. TS 38.214.', '链路自适应目标BLER(初传，通常0.1)。越低越稳健但吞吐越低。留空=全局。TS 38.214。')}
-        onChange={(v) => updateGnb(obj.id, { target_bler: v })} />
-      <NumOpt label={pick(lang, '간섭 마진', 'Interference margin', '干扰余量')} unit="dB" value={g.interference_margin_db} min={0} max={20} step={0.5}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '링크버짓 간섭 마진 — 셀 부하/인접셀 간섭 여유(클수록 유효 SINR↓). 미입력 시 전역값. TS 38.214.', 'Link-budget interference margin — headroom for cell load/inter-cell interference (higher lowers effective SINR). Empty = global. TS 38.214.', '链路预算干扰余量 — 小区负载/邻区干扰余量(越大有效SINR越低)。留空=全局。TS 38.214。')}
-        onChange={(v) => updateGnb(obj.id, { interference_margin_db: v })} />
-
-      {/* per-cell 전파환경 오버라이드 (TR 38.901 / TS 38.101-1). 비우면 전역 RF 기본값 폴백. */}
-      <div className="section-label sub-bold">
-        🌐 {pick(lang,
-          '전파환경 (per-cell)',
-          'Propagation (per-cell)',
-          '传播环境 (per-cell)')}
-      </div>
-      <NumOpt label={pick(lang, '경로손실 지수 n', 'Path-loss exponent n', '路径损耗指数 n')} unit="n" value={g.path_loss_exp} min={1.5} max={6} step={0.1}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '경로손실 지수 n (셀 국소 환경, TR 38.901). 미입력=전역', 'Path-loss exponent n (cell-local environment, TR 38.901). Empty = global.', '路径损耗指数 n (小区局部环境, TR 38.901)。留空=全局。')}
-        onChange={(v) => updateGnb(obj.id, { path_loss_exp: v })} />
-      <NumOpt label={pick(lang, '쉐도우 페이딩 σ', 'Shadow fading σ', '阴影衰落 σ')} unit="dB" value={g.shadow_sigma_db} min={0} max={12} step={0.1}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '쉐도우 페이딩 σ (셀 국소, TR 38.901). 미입력=전역', 'Shadow fading σ (cell-local, TR 38.901). Empty = global.', '阴影衰落 σ (小区局部, TR 38.901)。留空=全局。')}
-        onChange={(v) => updateGnb(obj.id, { shadow_sigma_db: v })} />
-      <NumOpt label={pick(lang, 'UE 최대 송신출력 Pmax', 'UE max Tx power Pmax', 'UE 最大发射功率 Pmax')} unit="dBm" value={g.ue_pmax_dbm} min={0} max={33} step={0.5}
-        placeholder={pick(lang, '전역값', 'global', '全局')}
-        title={pick(lang, '이 셀 가정 UE 최대 송신출력 Pmax (UL 링크버짓, TS 38.101-1). 미입력=전역', 'Assumed UE max Tx power Pmax for this cell (UL link budget, TS 38.101-1). Empty = global.', '本小区假定UE最大发射功率Pmax (UL链路预算, TS 38.101-1)。留空=全局。')}
-        onChange={(v) => updateGnb(obj.id, { ue_pmax_dbm: v })} />
+// 3D 선택 파라미터 패널(ParamsPanel)에서 쓰는 통합 편집기 — 세 그룹을 순서대로 렌더.
+// RU=RF, DU=스케줄링/RLC·MAC, CU=RRC/이동성/PDCP (모두 이 RU의 gnb에 저장, 동작 불변).
+export function GnbParamsEditor({ obj }: { obj: SceneObject }) {
+  return (
+    <>
+      <GnbRfFields obj={obj} />
+      <GnbDuFields obj={obj} />
+      <GnbCuFields obj={obj} />
     </>
   )
 }
@@ -1008,6 +1052,7 @@ export function ParamsPanel() {
   const objects = useStore((s) => s.objects)
   const updateObject = useStore((s) => s.updateObject)
   const removeObject = useStore((s) => s.removeObject)
+  const select = useStore((s) => s.select)
   const mode = useStore((s) => s.mode)
   const space = useStore((s) => s.space)
   const { dragStyle, headerProps } = usePanelDrag()
@@ -1032,6 +1077,15 @@ export function ParamsPanel() {
           value={obj.name}
           onChange={(e) => updateObject(obj.id, { name: e.target.value })}
         />
+        <button
+          className="log-btn"
+          style={{ marginLeft: 'auto' }}
+          title={pick(lang, '닫기 (선택 해제)', 'Close (deselect)', '关闭 (取消选择)')}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={() => select(null)}
+        >
+          ✕
+        </button>
       </div>
 
       <div className="section-label">{t('placement')}</div>
