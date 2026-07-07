@@ -1,6 +1,6 @@
 // 논리 Core 구성 패널 — NF는 실물 배치 없이 국가(PLMN-A/B) 소속만 선택.
 // NF 추가/삭제, 존 이동, 레플리카/HA/HPA/가동 제어, DN 연결.
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { NF_DESC, pick, useT } from '../i18n'
 import { useStore } from '../store'
 import { frontRef } from './zorder'
@@ -14,11 +14,18 @@ function NfRow({ nf }: { nf: CoreNf }) {
   const lang = useStore((s) => s.lang)
   const loadInfo = useStore((s) => s.nfLoads[nf.id])
   const [open, setOpen] = useState(false)
+  const [imsiOpen, setImsiOpen] = useState(false)
   const coreNfs = useStore((s) => s.coreNfs)
   const siteDown = useStore((s) => s.siteDown)
+  // QoS 정책은 PCF가 저작(TS 23.501 §5.7), UE-AMBR은 UDM 가입 데이터(§5.7.1.6)
+  const qos = useStore((s) => s.qos)
+  const setQos = useStore((s) => s.setQos)
+  const subscription = useStore((s) => s.subscription)
+  const setSubscription = useStore((s) => s.setSubscription)
 
   const loadPct = loadInfo ? Math.round(loadInfo.load * 100) : null
   const loadClass = loadPct === null ? '' : loadPct > 95 ? 'bad' : loadPct > 80 ? 'warn' : 'good'
+  const hasNssf = coreNfs.some((n) => n.nf_type === 'NSSF')
   const siblings = coreNfs.filter((n) => n.zone === nf.zone && n.nf_type === nf.nf_type)
   const active = activeNf(coreNfs, nf.zone, nf.nf_type, siteDown)
   const siteIsDown = siteDown[nf.site]
@@ -212,20 +219,255 @@ function NfRow({ nf }: { nf: CoreNf }) {
                   }}
                 />
               </label>
+              <label className="field" title={pick(lang, '암시적 디레지스트레이션 타이머(분, 0=무제한). T3512 만료 후 UE 무응답 시 AMF가 암묵적으로 등록 해제. TS 23.501 §5.3.4.', 'Implicit de-registration timer (min, 0=unlimited). After T3512 expiry with no UE response, AMF implicitly de-registers the UE. TS 23.501 §5.3.4.', '隐式去注册定时器(分, 0=无限). T3512超时后UE无响应时AMF隐式去注册。TS 23.501 §5.3.4。')}>
+                <span>{pick(lang, '암시적 디레지', 'Implicit de-reg', '隐式去注册')} <em>(min, 0=∞)</em></span>
+                <input
+                  type="number"
+                  value={nf.implicit_dereg_min ?? 0}
+                  min={0}
+                  max={100000}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value)
+                    if (!Number.isNaN(v)) updateCoreNf(nf.id, { implicit_dereg_min: Math.max(v, 0) })
+                  }}
+                />
+              </label>
+              {/* NSSF 부재 시 AMF에서 max_allowed_nssai 편집 가능(폴백) — TS 23.501 §5.15.4 */}
+              {!hasNssf && (
+                <label className="field" title={pick(lang, '동시 허용 S-NSSAI 최대(NSSF 부재 시 AMF 폴백). 초과분은 Allowed-NSSAI에서 배제, 전부 배제 시 Registration Reject #62. TS 23.501 §5.15.4.', 'Max simultaneously allowed S-NSSAIs (AMF fallback when no NSSF). Excess dropped from Allowed-NSSAI; if all dropped → Registration Reject #62. TS 23.501 §5.15.4.', '同时允许S-NSSAI最大数(无NSSF时AMF回退). 超出的从Allowed-NSSAI排除, 全部排除→Registration Reject #62。TS 23.501 §5.15.4。')}>
+                  <span>{pick(lang, '최대 허용 S-NSSAI', 'Max allowed S-NSSAI', '最大允许S-NSSAI')}</span>
+                  <input
+                    type="number"
+                    value={nf.max_allowed_nssai ?? 8}
+                    min={1}
+                    max={16}
+                    onChange={(e) => {
+                      const v = parseInt(e.target.value)
+                      if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_allowed_nssai: Math.min(Math.max(v, 1), 16) })
+                    }}
+                  />
+                </label>
+              )}
             </>
           )}
           {/* SMF 전용 PDU 세션 상한 — TS 23.501 §5.6 */}
           {nf.nf_type === 'SMF' && (
-            <label className="field" title={pick(lang, 'SMF PDU 세션 상한(0=무제한). 초과 시 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF max PDU sessions (0=unlimited). Excess → 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF PDU会话上限(0=无限). 超出→5GSM #26 Insufficient resources。TS 23.501 §5.6。')}>
-              <span>{pick(lang, '최대 PDU 세션', 'Max PDU sessions', '最大PDU会话')} <em>(0=∞)</em></span>
+            <>
+              <label className="field" title={pick(lang, 'SMF PDU 세션 상한(0=무제한). 초과 시 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF max PDU sessions (0=unlimited). Excess → 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF PDU会话上限(0=无限). 超出→5GSM #26 Insufficient resources。TS 23.501 §5.6。')}>
+                <span>{pick(lang, '최대 PDU 세션', 'Max PDU sessions', '最大PDU会话')} <em>(0=∞)</em></span>
+                <input
+                  type="number"
+                  value={nf.max_pdu_sessions ?? 0}
+                  min={0}
+                  max={10000000}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value)
+                    if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_pdu_sessions: Math.max(v, 0) })
+                  }}
+                />
+              </label>
+              <label className="field" title={pick(lang, 'DNN 백오프 타이머 T3396(분, 0=미부가). 5GSM #26 리젝트에 부가되어 UE의 재시도를 억제(혼잡 완화). TS 24.501 §6.2.8.', 'DNN back-off timer T3396 (min, 0=not included). Attached to 5GSM #26 reject to throttle UE retries (congestion relief). TS 24.501 §6.2.8.', 'DNN退避定时器T3396(分, 0=不附加). 附加到5GSM #26拒绝以抑制UE重试(缓解拥塞)。TS 24.501 §6.2.8。')}>
+                <span>T3396 <em>(min)</em></span>
+                <input
+                  type="number"
+                  value={nf.t3396_min ?? 12}
+                  min={0}
+                  max={1440}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value)
+                    if (!Number.isNaN(v)) updateCoreNf(nf.id, { t3396_min: Math.min(Math.max(v, 0), 1440) })
+                  }}
+                />
+              </label>
+            </>
+          )}
+          {/* NRF 전용 NF-profile heartbeat TTL — TS 29.510 */}
+          {nf.nf_type === 'NRF' && (
+            <label className="field" title={pick(lang, 'NF-profile heartbeat TTL(초). 이 시간 내 heartbeat 미수신 시 NRF가 NF-profile을 SUSPENDED/삭제 → NF discovery에서 제외. TS 29.510.', 'NF-profile heartbeat TTL (sec). Missing a heartbeat within this window marks the NF-profile SUSPENDED/removed → excluded from NF discovery. TS 29.510.', 'NF-profile心跳TTL(秒). 此窗口内未收到心跳则NRF将NF-profile置为SUSPENDED/删除 → 从NF发现中排除。TS 29.510。')}>
+              <span>{pick(lang, 'Heartbeat TTL', 'Heartbeat TTL', '心跳TTL')} <em>(sec)</em></span>
               <input
                 type="number"
-                value={nf.max_pdu_sessions ?? 0}
-                min={0}
-                max={10000000}
+                value={nf.nrf_ttl_sec ?? 30}
+                min={5}
+                max={600}
                 onChange={(e) => {
                   const v = parseInt(e.target.value)
-                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_pdu_sessions: Math.max(v, 0) })
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { nrf_ttl_sec: Math.min(Math.max(v, 5), 600) })
+                }}
+              />
+            </label>
+          )}
+          {/* NSSF 전용 동시 허용 S-NSSAI 최대 — TS 23.501 §5.15.4 */}
+          {nf.nf_type === 'NSSF' && (
+            <label className="field" title={pick(lang, '동시 허용 S-NSSAI 최대. 초과분은 Allowed-NSSAI에서 배제, 전부 배제 시 Registration Reject #62 No network slices available. TS 23.501 §5.15.4.', 'Max simultaneously allowed S-NSSAIs. Excess dropped from Allowed-NSSAI; if all dropped → Registration Reject #62 No network slices available. TS 23.501 §5.15.4.', '同时允许S-NSSAI最大数. 超出的从Allowed-NSSAI排除, 全部排除→Registration Reject #62 No network slices available。TS 23.501 §5.15.4。')}>
+              <span>{pick(lang, '최대 허용 S-NSSAI', 'Max allowed S-NSSAI', '最大允许S-NSSAI')}</span>
+              <input
+                type="number"
+                value={nf.max_allowed_nssai ?? 8}
+                min={1}
+                max={16}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_allowed_nssai: Math.min(Math.max(v, 1), 16) })
+                }}
+              />
+            </label>
+          )}
+          {/* AUSF/UDM 전용 인증 장애 주입 — TS 33.501 5G-AKA */}
+          {(nf.nf_type === 'AUSF' || nf.nf_type === 'UDM') && (
+            <label className="field" title={pick(lang, '인증 장애 주입: mac→인증 응답 #20 MAC failure, sync→#21 synchronisation failure. 5G-AKA(TS 33.501). 기본 none(정상).', 'Authentication fault injection: mac→auth response #20 MAC failure, sync→#21 synchronisation failure. 5G-AKA (TS 33.501). Default none (normal).', '认证故障注入: mac→认证响应 #20 MAC failure, sync→#21 synchronisation failure。5G-AKA(TS 33.501)。默认none(正常)。')}>
+              <span>{pick(lang, '인증 장애 주입', 'Auth fault', '认证故障注入')}</span>
+              <select
+                value={nf.auth_fail_mode ?? 'none'}
+                onChange={(e) => updateCoreNf(nf.id, { auth_fail_mode: e.target.value as 'none' | 'mac' | 'sync' })}
+              >
+                <option value="none">{pick(lang, 'none (정상)', 'none (normal)', 'none (正常)')}</option>
+                <option value="mac">mac · #20 MAC failure</option>
+                <option value="sync">sync · #21 sync failure</option>
+              </select>
+            </label>
+          )}
+          {/* UPF/SMF 전용 PFCP N4 heartbeat 주기 — TS 29.244 */}
+          {(nf.nf_type === 'UPF' || nf.nf_type === 'SMF') && (
+            <label className="field" title={pick(lang, 'PFCP N4 heartbeat 주기(초). 0=꺼짐. 응답 없으면 N4 association 해제 → PDU 세션 해제. TS 29.244.', 'PFCP N4 heartbeat period (sec). 0=off. No response → N4 association released → PDU sessions dropped. TS 29.244.', 'PFCP N4心跳周期(秒). 0=关闭. 无响应则N4关联解除→PDU会话释放。TS 29.244。')}>
+              <span>N4 heartbeat <em>(sec, 0=off)</em></span>
+              <input
+                type="number"
+                value={nf.n4_heartbeat_sec ?? 0}
+                min={0}
+                max={600}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { n4_heartbeat_sec: Math.min(Math.max(v, 0), 600) })
+                }}
+              />
+            </label>
+          )}
+          {/* SEPP 전용 N32 보안(handshake/cert) — TS 29.573 */}
+          {nf.nf_type === 'SEPP' && (
+            <label className="field checkbox" title={pick(lang, 'N32 handshake/cert 유효. 끄면 로밍 등록 실패 #11 PLMN not allowed. TS 29.573.', 'N32 handshake/cert valid. Off → roaming registration fails #11 PLMN not allowed. TS 29.573.', 'N32握手/证书有效. 关闭则漫游注册失败 #11 PLMN not allowed。TS 29.573。')}>
+              <span>N32 secure</span>
+              <input
+                type="checkbox"
+                checked={nf.sepp_n32_secure !== false}
+                onChange={(e) => updateCoreNf(nf.id, { sepp_n32_secure: e.target.checked })}
+              />
+            </label>
+          )}
+          {/* CHF 전용 온라인 과금 quota — TS 32.290 */}
+          {nf.nf_type === 'CHF' && (
+            <label className="field" title={pick(lang, '온라인 과금 부여 quota(MB). 0=무제한. 소진 시 세션 종료. TS 32.290.', 'Online-charging granted quota (MB). 0=unlimited. Exhaustion → session termination. TS 32.290.', '在线计费授予配额(MB). 0=无限. 耗尽则会话终止。TS 32.290。')}>
+              <span>{pick(lang, '과금 quota', 'Charging quota', '计费配额')} <em>(MB, 0=∞)</em></span>
+              <input
+                type="number"
+                value={nf.chf_quota_mb ?? 0}
+                min={0}
+                max={1000000}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { chf_quota_mb: Math.min(Math.max(v, 0), 1000000) })
+                }}
+              />
+            </label>
+          )}
+          {/* PCF 전용 기본 QoS-flow 5QI — TS 23.501 §5.7.4 */}
+          {nf.nf_type === 'PCF' && (
+            <label className="field" title={pick(lang, '기본 QoS-flow 5QI. TS 23.501 §5.7.4.', 'Default QoS-flow 5QI. TS 23.501 §5.7.4.', '默认QoS-flow 5QI。TS 23.501 §5.7.4。')}>
+              <span>{pick(lang, '기본 5QI', 'Default 5QI', '默认5QI')}</span>
+              <input
+                type="number"
+                value={nf.pcf_default_5qi ?? 9}
+                min={1}
+                max={255}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { pcf_default_5qi: Math.min(Math.max(v, 1), 255) })
+                }}
+              />
+            </label>
+          )}
+          {/* PCF 전용 QoS 정책 — ARP 선점 / 도착 모델 / GBR 알림 / Reflective QoS. PCF가 QoS 정책 저작. TS 23.501 §5.7 */}
+          {nf.nf_type === 'PCF' && (
+            <>
+              <label className="field checkbox" title={pick(lang, 'ARP 기반 선점 활성. 혼잡 시 높은 ARP 우선순위 GBR이 낮은 흐름을 선점. TS 23.501 §5.7.2.2. 기본 꺼짐.', 'Enable ARP-based pre-emption. Under congestion, higher-ARP GBR flows pre-empt lower ones. TS 23.501 §5.7.2.2. Default off.', '启用基于ARP的抢占. 拥塞时高ARP优先级GBR抢占低优先级流。TS 23.501 §5.7.2.2。默认关闭。')}>
+                <span>{pick(lang, 'ARP 선점', 'ARP pre-emption', 'ARP抢占')}</span>
+                <input
+                  type="checkbox"
+                  checked={qos.arp_preemption_enabled}
+                  onChange={(e) => setQos({ arp_preemption_enabled: e.target.checked })}
+                />
+              </label>
+              <label className="field" title={pick(lang, '트래픽 도착 모델: constant(고정)/poisson(변동)/onoff(버스트). 기본 constant.', 'Traffic arrival model: constant / poisson (variable) / onoff (bursty). Default constant.', '流量到达模型: constant(固定)/poisson(变动)/onoff(突发)。默认constant。')}>
+                <span>{pick(lang, '도착 모델', 'Arrival model', '到达模型')}</span>
+                <select
+                  value={qos.arrival_model}
+                  onChange={(e) => setQos({ arrival_model: e.target.value as 'constant' | 'poisson' | 'onoff' })}
+                >
+                  <option value="constant">constant</option>
+                  <option value="poisson">poisson</option>
+                  <option value="onoff">onoff</option>
+                </select>
+              </label>
+              <label className="field checkbox" title={pick(lang, 'GBR Notification control: GFBR 미보장 시 RAN 알림(Npcf). TS 23.501 §5.7.2.4. 기본 꺼짐.', 'GBR Notification control: notify RAN (Npcf) when GFBR cannot be guaranteed. TS 23.501 §5.7.2.4. Default off.', 'GBR Notification control: GFBR无法保证时通知RAN(Npcf)。TS 23.501 §5.7.2.4。默认关闭。')}>
+                <span>{pick(lang, 'GBR 알림 제어', 'GBR notify ctrl', 'GBR通知控制')}</span>
+                <input
+                  type="checkbox"
+                  checked={qos.gbr_notify_control}
+                  onChange={(e) => setQos({ gbr_notify_control: e.target.checked })}
+                />
+              </label>
+              <label className="field checkbox" title={pick(lang, 'Reflective QoS(RQA): UL을 DL QFI로 반영 매핑. TS 23.501 §5.7.5. 기본 꺼짐.', 'Reflective QoS (RQA): reflect UL onto DL QFI mapping. TS 23.501 §5.7.5. Default off.', 'Reflective QoS(RQA): 将UL反射映射到DL QFI。TS 23.501 §5.7.5。默认关闭。')}>
+                <span>{pick(lang, 'Reflective QoS', 'Reflective QoS', 'Reflective QoS')}</span>
+                <input
+                  type="checkbox"
+                  checked={qos.reflective_qos}
+                  onChange={(e) => setQos({ reflective_qos: e.target.checked })}
+                />
+              </label>
+            </>
+          )}
+          {/* UDM 전용 가입 데이터 UE-AMBR — UE 전체 비-GBR 집계 대역 상한. TS 23.501 §5.7.1.6 */}
+          {nf.nf_type === 'UDM' && (
+            <label className="field" title={pick(lang, 'UE-AMBR: UE 전체 비-GBR 집계 대역 상한(0=무제한). UDM 가입 데이터. TS 23.501 §5.7.1.6.', 'UE-AMBR: aggregate non-GBR bandwidth cap across all of a UE\'s sessions (0=unlimited). UDM subscription data. TS 23.501 §5.7.1.6.', 'UE-AMBR: UE全部非GBR聚合带宽上限(0=无限). UDM签约数据。TS 23.501 §5.7.1.6。')}>
+              <span>UE-AMBR <em>(Mbps, 0=∞)</em></span>
+              <input
+                type="number"
+                value={subscription.ue_ambr_mbps}
+                min={0}
+                max={100000}
+                step={1}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value)
+                  if (!Number.isNaN(v)) setSubscription({ ue_ambr_mbps: Math.max(v, 0) })
+                }}
+              />
+            </label>
+          )}
+          {/* UDM 전용 IMSI 등록 — UDM/UDR 가입자 프로비저닝. 버튼 클릭 시 목록+등록 UI 전개. */}
+          {nf.nf_type === 'UDM' && (
+            <>
+              <button
+                className="mobility-apply"
+                onClick={() => setImsiOpen(!imsiOpen)}
+                title={pick(lang, 'UDM/UDR 가입자 DB(IMSI) 프로비저닝 열기/닫기', 'Open/close UDM/UDR subscriber (IMSI) provisioning', '打开/关闭UDM/UDR用户(IMSI)开通')}
+              >
+                🪪 {pick(lang, 'IMSI 등록 (UDM/UDR 가입자 프로비저닝)', 'IMSI Registry (UDM/UDR provisioning)', 'IMSI 注册 (UDM/UDR 签约开通)')} {imsiOpen ? '▾' : '▸'}
+              </button>
+              {imsiOpen && <ImsiRegistrySection />}
+            </>
+          )}
+          {/* AMF 전용 T3502 재시도 타이머 — TS 24.501 */}
+          {nf.nf_type === 'AMF' && (
+            <label className="field" title={pick(lang, 'T3502 재시도 타이머(분). #22 리젝트에 부가되어 UE 재시도 간격을 늘림. TS 24.501.', 'T3502 retry timer (min), attached to #22 reject to widen UE retry interval. TS 24.501.', 'T3502重试定时器(分). 附加到#22拒绝以拉长UE重试间隔。TS 24.501。')}>
+              <span>T3502 <em>(min)</em></span>
+              <input
+                type="number"
+                value={nf.t3502_min ?? 12}
+                min={0}
+                max={1440}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { t3502_min: Math.min(Math.max(v, 0), 1440) })
                 }}
               />
             </label>
@@ -243,8 +485,6 @@ function ZoneCore({ zone }: { zone: Zone }) {
   const coreDn = useStore((s) => s.coreDn)
   const addCoreNf = useStore((s) => s.addCoreNf)
   const setCoreDn = useStore((s) => s.setCoreDn)
-  const ranArch = useStore((s) => s.ranArch)
-  const setRanArch = useStore((s) => s.setRanArch)
   const homeZone = useStore((s) => s.homeZone)
   const slices = useStore((s) => s.slices)
   const addSlice = useStore((s) => s.addSlice)
@@ -265,18 +505,6 @@ function ZoneCore({ zone }: { zone: Zone }) {
       <div className="zone-core-head">
         🌐 PLMN-{zone} ({roleTxt})
       </div>
-      {/* RAN 아키텍처 — DU/CU는 논리 구성 (실물 배치 없음) */}
-      <label className="field" title={pick(lang, 'RAN 아키텍처 — 일체형 gNB 또는 CU/DU 분리(F1) 논리 구성', 'RAN architecture — monolithic gNB or split CU/DU (F1)', 'RAN架构 — 一体式gNB或CU/DU分离(F1)')}>
-        <span>{pick(lang, 'RAN 구성', 'RAN arch', 'RAN 架构')}</span>
-        <select
-          value={ranArch[zone]}
-          onChange={(e) => setRanArch(zone, e.target.value as 'gnb' | 'cu-du')}
-        >
-          <option value="gnb">{pick(lang, '일체형 gNB', 'Monolithic gNB', '一体式 gNB')}</option>
-          <option value="cu-du">{pick(lang, 'CU-DU 분리 (F1)', 'CU-DU split (F1)', 'CU-DU 分离 (F1)')}</option>
-        </select>
-      </label>
-
       {/* Core 구성 — AMF/SMF/UPF 등 NF 목록 (PART 10) */}
       <div className="section-label" style={{ marginBottom: 2 }}>
         {pick(lang, 'Core 구성', 'Core config', 'Core 配置')}
@@ -354,6 +582,47 @@ function ZoneCore({ zone }: { zone: Zone }) {
                 }}
               />
             </label>
+            <label className="field" title={pick(lang, '슬라이스 NSAC UE 수용 상한(0=무제한). 초과 시 PDU 세션 거부 5GSM #69 + T3585 백오프. TS 23.501 §5.15.11.', 'Slice NSAC max admitted UEs (0=unlimited). Excess → PDU session reject 5GSM #69 + T3585 back-off. TS 23.501 §5.15.11.', '切片NSAC UE容纳上限(0=无限). 超出→PDU会话拒绝 5GSM #69 + T3585退避。TS 23.501 §5.15.11。')}>
+              <span>NSAC {pick(lang, '최대 UE', 'Max UE', '最大UE')} <em>(0=∞)</em></span>
+              <input
+                type="number"
+                value={s.nsac_max_ues ?? 0}
+                min={0}
+                max={10000000}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateSlice(s.id, { nsac_max_ues: Math.max(v, 0) })
+                }}
+              />
+            </label>
+            <label className="field" title={pick(lang, '슬라이스-AMBR: 슬라이스 집계 비-GBR 대역 상한(0=무제한). 초과분은 정책적 제한(스로틀). TS 23.501 §5.7.2.6.', 'Slice-AMBR: aggregate non-GBR bandwidth cap across the slice (0=unlimited). Excess is policed/throttled. TS 23.501 §5.7.2.6.', '切片-AMBR: 切片聚合非GBR带宽上限(0=无限). 超出部分被策略限速。TS 23.501 §5.7.2.6。')}>
+              <span>Slice-AMBR <em>(Mbps, 0=∞)</em></span>
+              <input
+                type="number"
+                value={s.slice_ambr_mbps ?? 0}
+                min={0}
+                max={100000}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value)
+                  if (!Number.isNaN(v)) updateSlice(s.id, { slice_ambr_mbps: Math.max(v, 0) })
+                }}
+              />
+            </label>
+            <label className="field" title={pick(lang, '이 슬라이스가 지원하는 5QI 목록. 목록 밖 5QI 요청 시 PDU 거부 #59. 비우면 전체 허용. TS 23.501 §5.7.', 'List of 5QIs this slice supports. Requesting a 5QI outside the list → PDU reject #59. Empty = allow all. TS 23.501 §5.7.', '此切片支持的5QI列表. 请求列表外的5QI时PDU拒绝 #59. 留空则全部允许。TS 23.501 §5.7。')}>
+              <span>{pick(lang, '허용 5QI', 'Allowed 5QI', '允许5QI')} <em>({pick(lang, '쉼표구분, 비움=전체', 'comma-sep, empty=all', '逗号分隔, 空=全部')})</em></span>
+              <input
+                type="text"
+                value={s.allowed_5qi?.join(',') ?? ''}
+                placeholder={pick(lang, '예: 1,2,9', 'e.g. 1,2,9', '例: 1,2,9')}
+                onChange={(e) => {
+                  const parsed = e.target.value
+                    .split(',')
+                    .map((x) => parseInt(x.trim(), 10))
+                    .filter((n) => !Number.isNaN(n))
+                  updateSlice(s.id, { allowed_5qi: parsed })
+                }}
+              />
+            </label>
           </div>
         </div>
       ))}
@@ -420,15 +689,15 @@ export function CorePanel() {
         <button className="log-btn" onClick={() => setShowCore(false)} title={pick(lang, 'Core 구성 패널 닫기', 'Close Core config panel', '关闭核心网配置面板')}>✕</button>
       </div>
       <SiteFailureBar />
+      {/* 존별로 Core 구성 → RAN 구성을 한 블록으로 묶어 표시 */}
       <div className="corepanel-body">
         {ZONES.map((z) => (
-          <ZoneCore key={z} zone={z} />
+          <Fragment key={z}>
+            <ZoneCore zone={z} />
+            <RanZone zone={z} />
+          </Fragment>
         ))}
       </div>
-      <MobilitySection />
-      <RfSubscriptionSection />
-      <RanSection />
-      <ImsiRegistrySection />
     </div>
   )
 }
@@ -781,6 +1050,8 @@ function RanZone({ zone }: { zone: Zone }) {
   const objects = useStore((s) => s.objects)
   const addRanUnit = useStore((s) => s.addRanUnit)
   const addRadio = useStore((s) => s.addRadio)
+  const ranArch = useStore((s) => s.ranArch)
+  const setRanArch = useStore((s) => s.setRanArch)
 
   const cus = ranUnits.filter((u) => u.kind === 'cu' && u.zone === zone)
   const dus = ranUnits.filter((u) => u.kind === 'du' && u.zone === zone)
@@ -793,6 +1064,18 @@ function RanZone({ zone }: { zone: Zone }) {
       <div className="zone-core-head">
         📡 PLMN-{zone} · RAN
       </div>
+
+      {/* RAN 아키텍처 — 일체형 gNB 또는 CU/DU 분리(F1) 논리 구성 (RAN config) */}
+      <label className="field" title={pick(lang, 'RAN 아키텍처 — 일체형 gNB 또는 CU/DU 분리(F1) 논리 구성', 'RAN architecture — monolithic gNB or split CU/DU (F1)', 'RAN架构 — 一体式gNB或CU/DU分离(F1)')}>
+        <span>{pick(lang, 'RAN 구성', 'RAN arch', 'RAN 架构')}</span>
+        <select
+          value={ranArch[zone]}
+          onChange={(e) => setRanArch(zone, e.target.value as 'gnb' | 'cu-du')}
+        >
+          <option value="gnb">{pick(lang, '일체형 gNB', 'Monolithic gNB', '一体式 gNB')}</option>
+          <option value="cu-du">{pick(lang, 'CU-DU 분리 (F1)', 'CU-DU split (F1)', 'CU-DU 分离 (F1)')}</option>
+        </select>
+      </label>
 
       {/* 존별 추가 버튼 — gNB/eNB(실물 RU) + CU/DU(논리 유닛) */}
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 4 }}>
@@ -837,191 +1120,6 @@ function RanZone({ zone }: { zone: Zone }) {
       {rus.length === 0
         ? <div className="log-empty">{pick(lang, 'RU 없음', 'No RU', '无 RU')}</div>
         : rus.map((ru) => <RanRuRow key={ru.id} ru={ru} />)}
-    </div>
-  )
-}
-
-// RAN 구성 섹션 — MobilitySection과 동일하게 corepanel 하단에 배치. 존별 RanZone 나열.
-function RanSection() {
-  const lang = useStore((s) => s.lang)
-  return (
-    <div className="zone-core" style={{ marginTop: 10 }}>
-      <div className="zone-core-head">
-        📡 {pick(lang, 'RAN 구성 (무선접속망)', 'RAN Configuration', 'RAN 配置')}
-      </div>
-      <div className="corepanel-body">
-        {ZONES.map((z) => (
-          <RanZone key={z} zone={z} />
-        ))}
-      </div>
-      <div className="material-note" style={{ marginTop: 6 }}>
-        {pick(lang,
-          'RAN 계층: RU(gNB/eNB, 실물 라디오) → 프론트홀 → DU(RLC/MAC/PHY-High) → F1 → CU(RRC/PDCP). RU의 "연결 DU", DU의 "연결 CU"로 상위 노드에 연결합니다. gNB/eNB는 존별 ＋버튼으로 추가하고 ⚙로 전체 무선 파라미터를 엽니다.',
-          'RAN hierarchy: RU (gNB/eNB, physical radio) → fronthaul → DU (RLC/MAC/PHY-High) → F1 → CU (RRC/PDCP). Attach an RU to a DU via its "Linked DU", and a DU to a CU via its "Linked CU". Add gNB/eNB with the per-zone ＋buttons and open full radio params with ⚙.',
-          'RAN 层级: RU(gNB/eNB, 实物无线) → 前传 → DU(RLC/MAC/PHY-High) → F1 → CU(RRC/PDCP)。通过RU的"连接DU"、DU的"连接CU"连接上级节点。用各区的＋按钮添加gNB/eNB，用⚙打开全部无线参数。')}
-      </div>
-    </div>
-  )
-}
-
-// 이동성 일괄 설정 — 전역 A3/CIO 값을 모든 RU에 일괄 적용. 걷기 모드 핸드오버 판정에도 적용됨.
-function MobilitySection() {
-  const lang = useStore((s) => s.lang)
-  const mobility = useStore((s) => s.mobility)
-  const setMobility = useStore((s) => s.setMobility)
-  const bulkApplyMobility = useStore((s) => s.bulkApplyMobility)
-
-  const MOB_TIP: Record<string, [string, string, string]> = {
-    a3_offset_db: ['A3 오프셋 — 이웃셀이 서빙셀보다 이만큼 강해야 핸드오버 후보', 'A3 offset — neighbor must exceed serving by this to trigger handover', 'A3偏置 — 邻区须比服务小区强此值才触发切换'],
-    hysteresis_db: ['히스테리시스 — 핑퐁 방지용 여유 마진', 'Hysteresis — margin to prevent ping-pong handovers', '迟滞 — 防止乒乓切换的余量'],
-    ttt_ms: ['TimeToTrigger — 조건이 이 시간 지속돼야 핸드오버', 'TimeToTrigger — condition must hold this long before handover', 'TimeToTrigger — 条件须持续此时长才切换'],
-    cio_db: ['셀 개별 오프셋(CIO) — 셀 경계 미세 조정', 'Cell Individual Offset — fine-tune cell boundary', '小区独立偏置(CIO) — 微调小区边界'],
-    a2_threshold_dbm: ['A2 임계 — 서빙셀이 이 아래로 떨어지면 측정 시작', 'A2 threshold — start measurements when serving drops below this', 'A2门限 — 服务小区低于此值时开始测量'],
-    t310_ms: ['T310 — 하향품질 저하 지속 시 만료→무선링크실패(RLF)', 'T310 — expires on sustained poor downlink → Radio Link Failure', 'T310 — 下行质量持续变差超时→无线链路失败(RLF)'],
-    n310: ['N310 — RLF 판정 전 연속 불량 지시 횟수', 'N310 — consecutive out-of-sync indications before RLF', 'N310 — 判定RLF前连续失步次数'],
-    n311: ['N311 — T310 해제(in-sync) 연속 카운트. TS 38.331.', 'N311 — consecutive in-sync indications to stop T310. TS 38.331.', 'N311 — 停止T310的连续同步(in-sync)指示次数。TS 38.331。'],
-    t304_ms: ['T304 — 핸드오버 실행 타이머(ms). 타겟 동기 실패 시 HO 실패→재수립. TS 38.331.', 'T304 — handover execution timer (ms); target sync failure → HO failure → re-establishment. TS 38.331.', 'T304 — 切换执行定时器(ms); 目标同步失败→切换失败→重建。TS 38.331。'],
-    call_drop_rsrp_dbm: ['통화드롭 RSRP — 이 세기 아래로 떨어지면 통화 끊김', 'Call-drop RSRP — call drops when signal falls below this', '掉话RSRP — 信号低于此值时通话中断'],
-    rlf_rsrp_dbm: ['RLF RSRP 기준 — 이 값 미만이 T310 동안 지속되면 무선링크실패(RLF)', 'RLF RSRP threshold — sustained below this for T310 declares Radio Link Failure (RLF)', 'RLF RSRP门限 — 低于此值持续T310则判定无线链路失败(RLF)'],
-  }
-  const num = (label: string, key: keyof typeof mobility, min: number, max: number, step: number, unit: string) => (
-    <label className="field" title={MOB_TIP[key as string] ? pick(lang, MOB_TIP[key as string][0], MOB_TIP[key as string][1], MOB_TIP[key as string][2]) : undefined}>
-      <span>{label} <em>({unit})</em></span>
-      <input
-        type="number"
-        value={mobility[key]}
-        min={min}
-        max={max}
-        step={step}
-        onChange={(e) => {
-          const v = parseFloat(e.target.value)
-          if (!Number.isNaN(v)) setMobility({ [key]: Math.min(Math.max(v, min), max) })
-        }}
-      />
-    </label>
-  )
-
-  return (
-    <div className="zone-core" style={{ marginTop: 10 }}>
-      <div className="zone-core-head">
-        📶 {pick(lang, '이동성 일괄 설정 (A3 이벤트)', 'Mobility — bulk settings (A3 event)', '移动性 — 一键设置 (A3 事件)')}
-      </div>
-      <div className="mobility-row">
-        {num('A3 Offset', 'a3_offset_db', 0, 15, 0.5, 'dB')}
-        {num('Hysteresis', 'hysteresis_db', 0, 15, 0.5, 'dB')}
-        {num('TimeToTrigger', 'ttt_ms', 0, 5120, 40, 'ms')}
-      </div>
-      <div className="mobility-row">
-        {num('CIO', 'cio_db', -24, 24, 0.5, 'dB')}
-        {num('A2 임계', 'a2_threshold_dbm', -140, -60, 1, 'dBm')}
-        {num('T310 (RLF)', 't310_ms', 0, 8000, 100, 'ms')}
-      </div>
-      <div className="mobility-row">
-        {num('N310', 'n310', 1, 20, 1, '회')}
-        {/* 통화드롭 RSRP — 라벨 바로 오른쪽에 입력 (PART 10) */}
-        {num(pick(lang, '통화드롭', 'Call-drop', '掉话'), 'call_drop_rsrp_dbm', -140, -80, 1, 'dBm')}
-        {num(pick(lang, 'RLF RSRP 기준', 'RLF RSRP threshold', 'RLF RSRP门限'), 'rlf_rsrp_dbm', -140, -80, 1, 'dBm')}
-      </div>
-      <div className="mobility-row">
-        {num('N311', 'n311', 1, 10, 1, pick(lang, '회', 'cnt', '次'))}
-        {num('T304', 't304_ms', 100, 5000, 100, 'ms')}
-      </div>
-      <button className="mobility-apply" onClick={bulkApplyMobility}
-        title={pick(lang, '위 A3/CIO/TTT 값을 모든 RU에 한 번에 반영', 'Push the A3/CIO/TTT values above to every RU at once', '将上面的A3/CIO/TTT值一次性下发到所有RU')}>
-        📶 {pick(lang, '모든 RU에 일괄 적용', 'Apply to all RUs', '应用到所有 RU')}
-      </button>
-      <div className="material-note">
-        {pick(
-          lang,
-          'A3(핸드오버): 이웃 셀 RSRP가 (서빙 + Offset + Hysteresis)를 TTT 시간만큼 넘어서면 핸드오버하며, 셀별 CIO로 경계를 미세 조정합니다. A2: 서빙 셀이 임계 아래로 떨어지면 측정을 시작합니다. T310/N310: 하향 무선품질 저하가 지속되면 T310이 만료되어 무선링크 실패(RLF)로 판정합니다. TTT를 낮추면 핑퐁 핸드오버가, 임계를 높이면 조기 핸드오버가 로그에 나타납니다. [일괄 적용]은 위 A3/CIO 값을 모든 RU에 한 번에 반영합니다.',
-          'A3 (handover): triggers when a neighbor\'s RSRP stays above (serving + Offset + Hysteresis) for the TTT duration; per-cell CIO fine-tunes the boundary. A2: starts measurements once the serving cell drops below the threshold. T310/N310: sustained poor downlink expires T310, declaring Radio Link Failure (RLF). Lowering TTT surfaces ping-pong handovers; raising the threshold surfaces early handovers in the logs. "Apply to all RUs" pushes the A3/CIO values above to every RU at once.',
-          'A3(切换): 当邻区 RSRP 在 TTT 时长内持续高于 (服务小区 + Offset + Hysteresis) 时触发切换，并用每小区 CIO 微调边界。A2: 服务小区低于门限时开始测量。T310/N310: 下行质量持续变差使 T310 超时，判定无线链路失败(RLF)。减小 TTT 会出现乒乓切换，提高门限会出现过早切换。"应用到所有 RU" 将上面的 A3/CIO 值一次性下发到每个 RU。',
-        )}
-      </div>
-    </div>
-  )
-}
-
-// RF / 가입자 (RF & Subscription) — 씬 레벨 전파/링크버짓 + UE-AMBR 튜닝.
-// path_loss/noise/Pmax는 전역 전파모델 입력(TR 38.901 / TS 38.101), UE-AMBR은 가입 프로파일(TS 23.501).
-function RfSubscriptionSection() {
-  const lang = useStore((s) => s.lang)
-  const rf = useStore((s) => s.rf)
-  const subscription = useStore((s) => s.subscription)
-  const setRf = useStore((s) => s.setRf)
-  const setSubscription = useStore((s) => s.setSubscription)
-
-  return (
-    <div className="zone-core" style={{ marginTop: 10 }}>
-      <div className="zone-core-head">
-        📡 {pick(lang, 'RF / 가입자', 'RF & Subscription', 'RF / 签约')}
-      </div>
-      <div className="mobility-row">
-        <label className="field" title={pick(lang, '경로손실 지수 n(환경). 클수록 커버리지 급감. TR 38.901.', 'Path-loss exponent n (environment). Higher = coverage drops off faster. TR 38.901.', '路径损耗指数n(环境). 越大覆盖越快衰减。TR 38.901。')}>
-          <span>{pick(lang, '경로손실 지수', 'Path-loss exp', '路径损耗指数')} <em>(n)</em></span>
-          <input
-            type="number"
-            value={rf.path_loss_exp}
-            min={1.5}
-            max={5.0}
-            step={0.1}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value)
-              if (!Number.isNaN(v)) setRf({ path_loss_exp: Math.min(Math.max(v, 1.5), 5.0) })
-            }}
-          />
-        </label>
-        <label className="field" title={pick(lang, '수신 잡음지수 NF. 클수록 SINR 하락(전역). TS 38.101-4.', 'Receiver noise figure NF. Higher = lower SINR (global). TS 38.101-4.', '接收噪声系数NF. 越大SINR越低(全局)。TS 38.101-4。')}>
-          <span>{pick(lang, '잡음지수', 'Noise figure', '噪声系数')} <em>(dB)</em></span>
-          <input
-            type="number"
-            value={rf.noise_figure_db}
-            min={0}
-            max={20}
-            step={0.5}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value)
-              if (!Number.isNaN(v)) setRf({ noise_figure_db: Math.min(Math.max(v, 0), 20) })
-            }}
-          />
-        </label>
-        <label className="field" title={pick(lang, 'UE 최대 송신출력 Pmax. 낮으면 셀엣지 UL/PRACH 실패. TS 38.101-1.', 'UE max TX power Pmax. Low → cell-edge UL/PRACH failures. TS 38.101-1.', 'UE最大发射功率Pmax. 过低→小区边缘UL/PRACH失败。TS 38.101-1。')}>
-          <span>{pick(lang, 'UE Pmax', 'UE Pmax', 'UE Pmax')} <em>(dBm)</em></span>
-          <input
-            type="number"
-            value={rf.ue_pmax_dbm}
-            min={0}
-            max={33}
-            step={1}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value)
-              if (!Number.isNaN(v)) setRf({ ue_pmax_dbm: Math.min(Math.max(v, 0), 33) })
-            }}
-          />
-        </label>
-      </div>
-      <div className="mobility-row">
-        <label className="field" title={pick(lang, 'UE-AMBR: UE 전체 비-GBR 집계 대역 상한(0=무제한). TS 23.501 §5.7.1.6.', 'UE-AMBR: aggregate non-GBR bandwidth cap across all of a UE\'s sessions (0=unlimited). TS 23.501 §5.7.1.6.', 'UE-AMBR: UE全部非GBR聚合带宽上限(0=无限)。TS 23.501 §5.7.1.6。')}>
-          <span>UE-AMBR <em>(Mbps, 0=∞)</em></span>
-          <input
-            type="number"
-            value={subscription.ue_ambr_mbps}
-            min={0}
-            max={100000}
-            step={1}
-            onChange={(e) => {
-              const v = parseFloat(e.target.value)
-              if (!Number.isNaN(v)) setSubscription({ ue_ambr_mbps: Math.max(v, 0) })
-            }}
-          />
-        </label>
-      </div>
-      <div className="material-note">
-        {pick(lang,
-          '경로손실 지수·잡음지수·UE Pmax는 전역 전파/링크버짓 모델(TR 38.901 / TS 38.101) 입력으로 커버리지·SINR·셀엣지 접속에 영향을 줍니다. UE-AMBR은 가입 프로파일 상한으로, 초과분은 정책적으로 스로틀됩니다.',
-          'Path-loss exponent, noise figure and UE Pmax feed the global propagation/link-budget model (TR 38.901 / TS 38.101), affecting coverage, SINR and cell-edge access. UE-AMBR is a subscription cap; excess is policed/throttled.',
-          '路径损耗指数、噪声系数和UE Pmax作为全局传播/链路预算模型(TR 38.901 / TS 38.101)输入, 影响覆盖、SINR和小区边缘接入。UE-AMBR是签约上限, 超出部分被策略限速。')}
-      </div>
     </div>
   )
 }

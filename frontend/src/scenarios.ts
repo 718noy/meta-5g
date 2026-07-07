@@ -1,7 +1,7 @@
 // 실제 5G use case(콜플로우/실패 사례) 프리셋 — 실무·3GPP TS 24.501 cause 기반.
 // 각 시나리오는 씬/파라미터를 설정하고, 시뮬레이터가 재현하는 결과가 "기대 결과"와
 // 맞는지 검증(pass/fail)한다. 성공 케이스와 실패 케이스를 모두 수집.
-import type { CoreNf, NfType, SceneObject, Zone } from './types'
+import type { CoreNf, GnbParams, NfParams, NfType, SceneObject, Slice, Zone } from './types'
 import { computeCall, computeE2E, computeIms, computeRoamingPath } from './types'
 
 export interface ScenarioResult {
@@ -40,9 +40,21 @@ export type SetupOp =
   | { op: 'disableNf'; zone: Zone; type: NfType }
   | { op: 'setDn'; zone: Zone; on: boolean }
   | { op: 'ensureRU'; zone: Zone }
-  | { op: 'ensurePerson'; zone: Zone; name: string }
+  | { op: 'ensurePerson'; zone: Zone; name: string; register?: boolean } // register:false → IMSI 미프로비저닝(Illegal UE #3)
   | { op: 'addSlice'; zone: Zone; sst: number; sd: string } // PART 3: 슬라이스 프로비저닝
   | { op: 'note'; text: string }
+  // ── REAL-condition ops (측정 UE 대량 배치 / NF·셀·슬라이스 파라미터 실설정) ──
+  // 존에 count명의 측정 UE 배치(실제 대량 부하/혼잡). register 기본 true(각 IMSI를 UDM/UDR에 프로비저닝);
+  // register:false면 IMSI 프로비저닝 없이 배치.
+  | { op: 'ensurePersons'; zone: Zone; count: number; register?: boolean }
+  // 해당 존의 NF 인스턴스에 파라미터 설정(예: max_registered_ue, capacity_per_pod, auth_fail_mode,
+  // sepp_n32_secure, chf_quota_mb, max_pdu_sessions). NF가 없으면 DEFAULT_NF로 생성 후 patch 병합.
+  | { op: 'nfParam'; zone: Zone; nf: NfType; patch: Partial<NfParams> }
+  // 존의 모든 RU(kind==='gnb')에 patch 병합(예: cell_barred, tx_power_dbm, q_rx_lev_min_dbm).
+  // RU가 없으면 DEFAULT_GNB로 하나 생성 후 patch.
+  | { op: 'ruParam'; zone: Zone; patch: Partial<GnbParams> }
+  // 존/sst가 일치하는 슬라이스에 patch 병합(예: nsac_max_ues, allowed_5qi, session_ambr_mbps).
+  | { op: 'sliceParam'; zone: Zone; sst: number; patch: Partial<Slice> }
 
 // ── 시나리오 카탈로그 ──────────────────────────────────────────
 export const SCENARIOS: Scenario[] = [
@@ -146,7 +158,7 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'Visited RU/AMF/UPF + both SEPP + home AUSF/UDM/UPF/DN → home-routed roaming OK.',
     desc_zh: '拜访 PLMN 的 RU/AMF/UPF + 双侧 SEPP(N32) + 归属 AUSF/UDM/UPF/DN → home-routed 漫游数据成功建立。',
     ref: 'TS 23.502 §4.2.2.2.2 roaming registration · TS 33.501 §13 SEPP/N32 · home-routed',
-    category: 'success',
+    domain: 'roaming', category: 'success',
     setup: [
       { op: 'ensureRU', zone: 'B' },
       { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'SMF' },
@@ -172,7 +184,7 @@ export const SCENARIOS: Scenario[] = [
     desc_en: 'No SEPP → N32 interconnect/security fails → roaming auth fails.',
     desc_zh: '拜访/归属网络无 SEPP → N32 互联/安全(PRINS)不可用 → 漫游鉴权失败。(现网:SEPP 证书与 NRF federation 是漫游失败前两大原因)',
     ref: 'TS 33.501 §13 SEPP · N32 · IPX. Field: SEPP cert & NRF federation = top-2 roaming failures',
-    cause: '5GSM #38 network failure', domain: 'roaming', category: 'failure',
+    cause: 'N32 interconnect failure — registration via VPLMN aborted (transient)', domain: 'roaming', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'B' },
       { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'SMF' },
@@ -244,18 +256,20 @@ export const SCENARIOS: Scenario[] = [
     id: 'congestion',
     ko: '혼잡 (대량 사용자)', en: 'Congestion (mass users)',
     zh: '拥塞 (海量用户)',
-    desc_ko: 'RU max_ue를 낮추고 측정요원 다수 배치+트래픽 → RRC Setup Reject / PRB 혼잡(>80%) / 셀엣지 스루풋 하락. (필드: PRB<80% 권장, 100% 근접 시 붕괴)',
-    desc_en: 'Lower max_ue, many UEs+traffic → RRC Setup Reject / PRB>80% / cell-edge throughput collapse.',
-    desc_zh: '降低 RU 的 max_ue 并部署大量 UE + 流量 → RRC Setup Reject / PRB 拥塞(>80%) / 小区边缘吞吐量下降。(现网:PRB<80% 为目标,接近 100% 时崩溃)',
-    ref: 'TS 38.331 RRC · admission control. Field: PRB<80% target, near-100% collapses',
-    category: 'failure',
+    desc_ko: '완전한 5GC + AMF max_registered_ue=2 + 측정요원 4명 → 3·4번째 UE가 실제 AMF admission 게이트에서 Registration Reject 5GMM #22 혼잡 + T3346 백오프.',
+    desc_en: 'Full 5GC + AMF max_registered_ue=2 + 4 UEs → 3rd/4th UE hits the real AMF admission gate → Registration Reject 5GMM #22 congestion + T3346 backoff.',
+    desc_zh: '完整 5GC + AMF max_registered_ue=2 + 部署 4 个 UE → 第 3/4 个 UE 在真实 AMF 准入门被 Registration Reject 5GMM #22 拥塞 + T3346 退避。',
+    ref: 'TS 24.501 §5.5.1/§5.3.20 · TS 23.501 §5.19.5 admission control · 5GMM #22 · T3346',
+    cause: '5GMM #22 Congestion + T3346 (AMF max_registered_ue)', domain: 'registration', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
-      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'RU max_ue를 4로 낮추고 측정요원을 6명 이상 배치 후 전체 트래픽 생성' },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 4 },
     ],
-    expect: () => ({ label_ko: 'PRB 혼잡/RRC Reject 로그 확인', label_en: 'Observe PRB congestion / RRC reject' }),
+    expect: () => ({ label_ko: '3·4번째 UE Registration Reject #22 — AMF 혼잡(T3346)', label_en: '3rd/4th UE Registration Reject #22 — AMF congestion (T3346)' }),
   },
   {
     id: 'pci-mod3',
@@ -300,9 +314,11 @@ export const SCENARIOS: Scenario[] = [
     category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
-      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'AMF 레플리카=1, HPA 끄고 파드당 용량을 낮춘 뒤 측정요원 대량 배치 → NGAP Overload Start 로그' },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 8 },
     ],
     expect: () => ({ label_ko: 'AMF 과부하 → NGAP Overload/T3346 로그', label_en: 'AMF overload → NGAP Overload/T3346' }),
   },
@@ -414,7 +430,7 @@ export const SCENARIOS: Scenario[] = [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
       { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
       { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'SIM 설정에서 IMSI를 한 자리라도 바꿔 미프로비저닝 IMSI로 만들면 #3 Illegal UE' },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1', register: false },
     ],
     expect: () => ({ label_ko: 'Registration Reject #3 — Illegal UE (unknown subscriber)', label_en: 'Registration Reject #3 — Illegal UE' }),
   },
@@ -479,8 +495,12 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: 'AMF NAS 级拥塞控制 → Registration Reject 5GMM #22 + T3346 退避(未保护时随机)。仅紧急/高优先/MT 允许。',
     ref: 'TS 24.501 §5.3.20 · 5GMM #22 Congestion · T3346', cause: '5GMM #22 + T3346', domain: 'registration', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'AMF 레플리카=1·용량↓로 과부하 유발 후 대량 등록 → #22 + T3346' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { max_registered_ue: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 4 },
     ],
     expect: () => ({ label_ko: 'Registration Reject #22 — Congestion (T3346 backoff)', label_en: 'Registration Reject #22 — Congestion (T3346)' }),
   },
@@ -541,7 +561,7 @@ export const SCENARIOS: Scenario[] = [
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
       { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
-      { op: 'note', text: 'UDM/USIM의 K를 불일치시키면 MAC 검증 실패 → #20' },
+      { op: 'nfParam', zone: 'A', nf: 'AUSF', patch: { auth_fail_mode: 'mac' } },
     ],
     expect: () => ({ label_ko: 'AUTHENTICATION FAILURE #20 — MAC failure', label_en: 'AUTH FAILURE #20 — MAC failure' }),
   },
@@ -555,7 +575,7 @@ export const SCENARIOS: Scenario[] = [
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
       { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
-      { op: 'note', text: 'USIM SQN을 UDM보다 앞서거나 뒤처지게 하면 #21 Synch failure + AUTS 재동기' },
+      { op: 'nfParam', zone: 'A', nf: 'AUSF', patch: { auth_fail_mode: 'sync' } },
     ],
     expect: () => ({ label_ko: 'AUTH FAILURE #21 — Synch failure (AUTS 재동기)', label_en: 'AUTH FAILURE #21 — Synch failure (AUTS)' }),
   },
@@ -779,23 +799,32 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: 'NSAC — 每切片最大 PDU 会话数超限 → NSACF 准入拒绝 → 5GSM #69 + T3585 退避。',
     ref: 'TS 23.501 §5.36 NSAC · 5GSM #69 · T3585', cause: '5GSM #69 + T3585', domain: 'pdu', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'ensureNf', zone: 'A', type: 'NSSF' },
-      { op: 'note', text: '슬라이스당 최대 PDU 초과(NSAC) → #69 + T3585' },
+      { op: 'setDn', zone: 'A', on: true },
+      { op: 'sliceParam', zone: 'A', sst: 1, patch: { nsac_max_ues: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 4 },
     ],
     expect: () => ({ label_ko: 'PDU Reject #69 — slice resources (NSAC, T3585)', label_en: 'PDU Reject #69 — slice resources (NSAC)' }),
   },
   {
     id: 'pdu-5qi-unsupported',
     ko: 'QoS 거부 #59 (미지원 5QI)', en: 'QoS reject #59 (unsupported 5QI)', zh: 'QoS 拒绝 #59 (不支持的 5QI)',
-    desc_ko: '요청 5QI를 네트워크가 미지원 → PDU MODIFICATION/EST에서 5GSM #59 Unsupported 5QI value(또는 #37 5GS QoS not accepted).',
-    desc_en: 'Requested 5QI unsupported → 5GSM #59 Unsupported 5QI value (or #37 5GS QoS not accepted).',
-    desc_zh: '请求的 5QI 不支持 → 5GSM #59 Unsupported 5QI value(或 #37 5GS QoS not accepted)。',
-    ref: 'TS 24.501 §6.4.2 · 5GSM #59 / #37', cause: '5GSM #59', domain: 'pdu', category: 'failure',
+    desc_ko: '슬라이스 allowed_5qi=[1,2](GBR만) + 기본 데이터 UE(5QI 9) → 요청 5QI가 슬라이스 허용집합 밖 → 5GSM #59 Unsupported 5QI value.',
+    desc_en: 'Slice allowed_5qi=[1,2] (GBR only) + default data UE (5QI 9) → requested 5QI outside the slice allowed set → 5GSM #59 Unsupported 5QI value.',
+    desc_zh: '切片 allowed_5qi=[1,2](仅 GBR) + 默认数据 UE(5QI 9) → 请求的 5QI 不在切片允许集 → 5GSM #59 Unsupported 5QI value。',
+    ref: 'TS 24.501 §6.4.2 · TS 23.501 §5.7 · 5GSM #59', cause: '5GSM #59', domain: 'pdu', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
       { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'ensureNf', zone: 'A', type: 'PCF' },
-      { op: 'note', text: '미지원 5QI 요청 → #59 Unsupported 5QI value' },
+      { op: 'setDn', zone: 'A', on: true },
+      { op: 'sliceParam', zone: 'A', sst: 1, patch: { allowed_5qi: [1, 2] } },
+      { op: 'ensurePersons', zone: 'A', count: 1 },
+      { op: 'note', text: '기본 데이터 트래픽(5QI 9)은 슬라이스 허용집합 [1,2] 밖 → 트래픽 생성 시 #59로 세션 거부' },
     ],
     expect: () => ({ label_ko: 'QoS Reject #59 — Unsupported 5QI value', label_en: 'QoS Reject #59 — Unsupported 5QI' }),
   },
@@ -824,7 +853,11 @@ export const SCENARIOS: Scenario[] = [
     ref: 'TS 38.304 §5.3.1 · TS 38.331 MIB cellBarred', cause: 'cellBarred (300s)', domain: 'ran', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' },
-      { op: 'note', text: 'RU를 cellBarred=barred로 두면 300s 배제·재선택' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ruParam', zone: 'A', patch: { cell_barred: true } },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' },
     ],
     expect: () => ({ label_ko: 'cellBarred — 300초 배제·재선택', label_en: 'cellBarred — excluded 300s, reselect' }),
   },
@@ -1157,8 +1190,12 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: '负载激增 → pod OOMKilled → HPA 扩容滞后 → 负载集中到存活 pod → 级联重启(雪崩)。',
     ref: 'TS 23.501 §5.19 overload · K8s HPA/OOM · cloud-native', cause: 'OOMKilled / HPA lag', domain: 'scale', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'HPA 끄고 capacity_per_pod↓ 후 부하 급증 → OOMKilled 연쇄' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'nfParam', zone: 'A', nf: 'AMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 8 },
     ],
     expect: () => ({ label_ko: 'NF OOMKilled → HPA lag → death-spiral', label_en: 'NF OOMKilled → HPA lag → death-spiral' }),
   },
@@ -1297,17 +1334,21 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: 'SIB1 无 RedCap indicator / 1-Rx barred → RedCap UE 被拒绝接入(Msg1/Msg3 早期识别)。',
     ref: 'TS 38.331 SIB1 RedCap-r17 · TS 38.300', cause: 'RedCap barred (SIB1)', domain: 'iot', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
-      { op: 'note', text: 'RU SIB1에 RedCap indicator 미방송/1-Rx barred → RedCap 접속 불가' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'ruParam', zone: 'A', patch: { cell_barred: true } },
+      { op: 'ensurePerson', zone: 'A', name: 'UE-A1' },
     ],
     expect: () => ({ label_ko: 'RedCap 접속 불가 (SIB1 indicator 없음/1-Rx barred)', label_en: 'RedCap barred (SIB1)' }),
   },
   {
     id: 'iot-psm-mt-fail',
     ko: 'PSM MT 실패 (페이징 불가)', en: 'PSM MT fail (unpageable)', zh: 'PSM MT 失败 (无法寻呼)',
-    desc_ko: 'IoT UE PSM active-time 만료로 딥슬립 → 페이징 도달 불가 → MT 데이터/SMS 실패 또는 다음 TAU까지 지연(HLcom 버퍼).',
-    desc_en: 'IoT UE in PSM (active-time expired) → unreachable to paging → MT data/SMS fails or delayed until next TAU (HLcom buffer).',
-    desc_zh: 'IoT UE 进入 PSM(active-time 到期) → 寻呼无法到达 → MT 数据/SMS 失败或延迟至下次 TAU(HLcom 缓冲)。',
+    desc_ko: 'IoT UE PSM active-time 만료로 딥슬립 → 페이징 도달 불가 → MT 데이터/SMS 실패 또는 다음 주기적 등록 갱신까지 지연(HLcom 버퍼).',
+    desc_en: 'IoT UE in PSM (active-time expired) → unreachable to paging → MT data/SMS fails or delayed until the next periodic registration update (HLcom buffer).',
+    desc_zh: 'IoT UE 进入 PSM(active-time 到期) → 寻呼无法到达 → MT 数据/SMS 失败或延迟至下次周期性注册更新(HLcom 缓冲)。',
     ref: 'TS 23.501 §5.4.1 PSM · TS 23.682 HLcom', cause: 'PSM unreachable (MT fail)', domain: 'iot', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' },
@@ -1500,8 +1541,12 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: '达到最大会话数时再建立 → AMF 不转发 SMF,以 DL NAS TRANSPORT 回复 5GMM #65(关键:SMF 不参与)。',
     ref: 'TS 24.501 §5.4.5 · 5GMM #65', cause: '5GMM #65 max PDU sessions', domain: 'pdu', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: '최대 세션 수 도달 후 추가 요청 → DL NAS TRANSPORT #65' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'nfParam', zone: 'A', nf: 'SMF', patch: { max_pdu_sessions: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 4 },
     ],
     expect: () => ({ label_ko: 'DL NAS TRANSPORT — 5GMM #65 max PDU sessions', label_en: '5GMM #65 — max PDU sessions reached' }),
   },
@@ -1622,10 +1667,10 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: 'roaming-hr-dnn-reject',
-    ko: 'HR 거부 #27 (HPLMN 미가입 DNN)', en: 'HR reject #27 (DNN not subscribed in HPLMN)', zh: 'HR 拒绝 #27 (归属未签约 DNN)',
-    desc_ko: '방문망 경유 홈 SMF(N16)에서 HPLMN 미가입 DNN 요청 → 5GSM #27 Missing or unknown DNN (H-SMF 판정).',
-    desc_en: 'Via visited network to home SMF (N16), a DNN not subscribed in HPLMN is requested → 5GSM #27 (H-SMF decision).',
-    desc_zh: '经拜访网到归属 SMF(N16)请求归属未签约的 DNN → 5GSM #27 Missing or unknown DNN(H-SMF 判定)。',
+    ko: 'HR 거부 #27 (HPLMN 미상 DNN)', en: 'HR reject #27 (unknown DNN in HPLMN)', zh: 'HR 拒绝 #27 (归属未知 DNN)',
+    desc_ko: '방문망 경유 홈 SMF(N16)에서 HPLMN에 없는(미상/미지원) DNN 요청 → 5GSM #27 Missing or unknown DNN (H-SMF 판정).',
+    desc_en: 'Via visited network to home SMF (N16), a DNN unknown/unsupported in the HPLMN is requested → 5GSM #27 Missing or unknown DNN (H-SMF decision).',
+    desc_zh: '经拜访网到归属 SMF(N16)请求归属网络未知/不支持的 DNN → 5GSM #27 Missing or unknown DNN(H-SMF 判定)。',
     ref: 'TS 23.502 §4.3.2 (HR) · 5GSM #27', cause: '5GSM #27 (H-SMF via N16)', domain: 'roaming', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'B' }, { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'SMF' },
@@ -1633,7 +1678,7 @@ export const SCENARIOS: Scenario[] = [
       { op: 'ensureNf', zone: 'A', type: 'SEPP' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
       { op: 'note', text: '홈 미가입 DNN 요청 → H-SMF #27' },
     ],
-    expect: () => ({ label_ko: 'HR PDU 거부 #27 (H-SMF, 미가입 DNN)', label_en: 'HR PDU reject #27 (unknown DNN)' }),
+    expect: () => ({ label_ko: 'HR PDU 거부 #27 (H-SMF, 미상 DNN)', label_en: 'HR PDU reject #27 (unknown DNN)' }),
   },
   {
     id: 'roaming-sor-ok',
@@ -2407,17 +2452,17 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: 'auth-snn-not-authorized',
-    ko: 'SNN 미인가 (403 → #11)', en: 'SNN not authorized (403 → #11)', zh: 'SNN 未授权 (403 → #11)',
-    desc_ko: 'VPLMN과 협정 없음 → 홈 AUSF가 Nausf_UEAuthentication 403 SERVING_NETWORK_NOT_AUTHORIZED → 방문 AMF Registration Reject 5GMM #11.',
-    desc_en: 'No agreement with VPLMN → home AUSF returns Nausf_UEAuthentication 403 SERVING_NETWORK_NOT_AUTHORIZED → visited AMF Registration Reject 5GMM #11.',
-    desc_zh: '与 VPLMN 无协议 → 归属 AUSF 返回 403 SERVING_NETWORK_NOT_AUTHORIZED → 拜访 AMF Registration Reject 5GMM #11。',
-    ref: 'TS 33.501 §6.1.2 (SNN check) · TS 29.509 · 5GMM #11', cause: 'AUSF 403 SERVING_NETWORK_NOT_AUTHORIZED → #11', domain: 'auth', category: 'failure',
+    ko: 'SNN 미인가 (403 → #73)', en: 'SNN not authorized (403 → #73)', zh: 'SNN 未授权 (403 → #73)',
+    desc_ko: 'VPLMN과 협정 없음 → 홈 AUSF가 Nausf_UEAuthentication 403 SERVING_NETWORK_NOT_AUTHORIZED → 방문 AMF Registration Reject 5GMM #73 Serving network not authorized.',
+    desc_en: 'No agreement with VPLMN → home AUSF returns Nausf_UEAuthentication 403 SERVING_NETWORK_NOT_AUTHORIZED → visited AMF Registration Reject 5GMM #73 Serving network not authorized.',
+    desc_zh: '与 VPLMN 无协议 → 归属 AUSF 返回 403 SERVING_NETWORK_NOT_AUTHORIZED → 拜访 AMF Registration Reject 5GMM #73 Serving network not authorized。',
+    ref: 'TS 24.501 §5.5.1 · TS 33.501 §6.1.2 (SNN check) · TS 29.509 · 5GMM #73', cause: 'AUSF 403 SERVING_NETWORK_NOT_AUTHORIZED → 5GMM #73 Serving network not authorized', domain: 'auth', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'B' }, { op: 'ensureNf', zone: 'B', type: 'AMF' }, { op: 'ensureNf', zone: 'B', type: 'SEPP' },
       { op: 'ensureNf', zone: 'A', type: 'SEPP' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
-      { op: 'note', text: 'VPLMN-B와 협정 없음 → 홈 AUSF 403 SNN not authorized → #11' },
+      { op: 'note', text: 'VPLMN-B와 협정 없음 → 홈 AUSF 403 SNN not authorized → #73 Serving network not authorized' },
     ],
-    expect: () => ({ label_ko: 'AUSF 403 SNN not authorized → Reject #11', label_en: 'AUSF 403 SNN not authorized → Reject #11' }),
+    expect: () => ({ label_ko: 'AUSF 403 SNN not authorized → Reject #73', label_en: 'AUSF 403 SNN not authorized → Reject #73' }),
   },
   {
     id: 'auth-linking-fail',
@@ -3295,10 +3340,10 @@ export const SCENARIOS: Scenario[] = [
   {
     id: 'vonr-emergency-reject',
     ko: '긴급 등록 거절 (정책/미지원)', en: 'Emergency registration reject', zh: '紧急注册拒绝',
-    desc_ko: '운용자 정책상 긴급 미지원 IM CN → 긴급 등록 거절(5GMM #5 계열/SIP 403).',
-    desc_en: 'IM CN not supporting emergency by operator policy → emergency registration rejected (5GMM #5-family / SIP 403).',
-    desc_zh: '按运营商策略 IM CN 不支持紧急 → 紧急注册被拒(5GMM #5 系列/SIP 403)。',
-    ref: 'TS 23.167 · TS 24.501 §5.5.1 (emergency reject)', cause: 'emergency reject (policy) — 5GMM #5 / SIP 403', domain: 'vonr', category: 'failure',
+    desc_ko: '운용자 정책상 긴급 미지원 IM CN → 긴급 등록 거절(SIP 403 / limited-service).',
+    desc_en: 'IM CN not supporting emergency by operator policy → emergency registration rejected (SIP 403 / limited-service).',
+    desc_zh: '按运营商策略 IM CN 不支持紧急 → 紧急注册被拒(SIP 403 / limited-service)。',
+    ref: 'TS 23.167 · TS 24.501 §5.5.1 (emergency reject)', cause: 'emergency reject (policy) — SIP 403 / limited-service', domain: 'vonr', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' },
       { op: 'note', text: '긴급 미지원 IM CN/정책 → 긴급 등록 거절' },
@@ -3307,16 +3352,16 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: 'vonr-srvcc-ok',
-    ko: 'eSRVCC 성공 (PS→CS)', en: 'eSRVCC success (PS→CS)', zh: 'eSRVCC 成功 (PS→CS)',
-    desc_ko: '통화 중 5G/LTE→UTRAN/GERAN 이동 → Sv PS-to-CS + ATCF anchoring → 음성단절 <0.3s.',
-    desc_en: 'In-call move 5G/LTE→UTRAN/GERAN → Sv PS-to-CS + ATCF anchoring → voice gap <0.3s.',
-    desc_zh: '通话中 5G/LTE→UTRAN/GERAN 移动 → Sv PS-to-CS + ATCF 锚定 → 语音中断 <0.3s。',
-    ref: 'TS 23.216 (eSRVCC) · TS 23.237 (ATCF)', cause: 'eSRVCC PS→CS (ATCF)', domain: 'vonr', category: 'success',
+    ko: '5G-SRVCC 성공 (NR→UTRAN)', en: '5G-SRVCC success (NR→UTRAN)', zh: '5G-SRVCC 成功 (NR→UTRAN)',
+    desc_ko: '통화 중 NR→UTRAN 이동(5G-SRVCC) → Sv PS-to-CS + ATCF anchoring → 음성단절 <0.3s.',
+    desc_en: 'In-call move NR→UTRAN (5G-SRVCC) → Sv PS-to-CS + ATCF anchoring → voice gap <0.3s.',
+    desc_zh: '通话中 NR→UTRAN 移动(5G-SRVCC) → Sv PS-to-CS + ATCF 锚定 → 语音中断 <0.3s。',
+    ref: 'TS 23.216 §6a (5G-SRVCC to UTRAN) · TS 23.237 (ATCF)', cause: '5G-SRVCC NR→UTRAN PS→CS (ATCF)', domain: 'vonr', category: 'success',
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'P-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'S-CSCF' }, { op: 'ensureNf', zone: 'A', type: 'MME' }, { op: 'ensureNf', zone: 'A', type: 'MGW' },
-      { op: 'note', text: '통화 중 eSRVCC → Sv PS-to-CS + ATCF anchoring' },
+      { op: 'note', text: '통화 중 5G-SRVCC(NR→UTRAN) → Sv PS-to-CS + ATCF anchoring' },
     ],
-    expect: () => ({ label_ko: 'eSRVCC 성공 (음성단절 <0.3s)', label_en: 'eSRVCC OK (voice gap <0.3s)' }),
+    expect: () => ({ label_ko: '5G-SRVCC 성공 (음성단절 <0.3s)', label_en: '5G-SRVCC OK (voice gap <0.3s)' }),
   },
   {
     id: 'vonr-srvcc-fail-stnsr',
@@ -3607,16 +3652,16 @@ export const SCENARIOS: Scenario[] = [
   },
   {
     id: 'up-ddn-failure',
-    ko: 'DDN Failure (버퍼 폐기)', en: 'DDN Failure (buffer discard)', zh: 'DDN Failure (缓冲丢弃)',
-    desc_ko: '페이징 무응답 → DDN Failure Indication → 버퍼 폐기(Suggested Buffering Packets Count 초과분 폐기). Extended Buffering으로 완화.',
-    desc_en: 'Paging no response → DDN Failure Indication → buffer discarded (packets beyond Suggested Buffering Packets Count dropped). Extended Buffering mitigates.',
-    desc_zh: '寻呼无响应 → DDN Failure Indication → 缓冲丢弃(超过 Suggested Buffering Packets Count 的丢弃)。Extended Buffering 缓解。',
-    ref: 'TS 29.244 · TS 23.502 (DDN Failure)', cause: 'DDN Failure → buffer discard', domain: 'userplane', category: 'failure',
+    ko: 'MT 페이징 실패 (확장 버퍼링)', en: 'MT paging fail (extended buffering)', zh: 'MT 寻呼失败 (扩展缓冲)',
+    desc_ko: 'UPF DL Data Notification → SMF Namf_Communication_N1N2MessageTransfer → AMF 페이징; UE(CM-IDLE) 무응답 시 N1N2 전송 실패 → SMF 확장 버퍼링(버퍼 초과분 폐기).',
+    desc_en: 'UPF DL Data Notification → SMF Namf_Communication_N1N2MessageTransfer → AMF paging; UE (CM-IDLE) no response → N1N2 transfer fails → SMF applies extended buffering (packets beyond buffer dropped).',
+    desc_zh: 'UPF DL Data Notification → SMF Namf_Communication_N1N2MessageTransfer → AMF 寻呼;UE(CM-IDLE)无响应 → N1N2 传输失败 → SMF 扩展缓冲(超出缓冲的丢弃)。',
+    ref: 'TS 23.502 §4.2.3.3 (Namf N1N2MessageTransfer) · TS 23.501 §5.31 (extended buffering)', cause: 'N1N2 transfer failure → SMF extended buffering', domain: 'userplane', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' },
-      { op: 'note', text: '페이징 무응답 → DDN Failure → 버퍼 폐기' },
+      { op: 'note', text: 'MT DL 데이터 + UE CM-IDLE/도달불가 → 페이징 무응답 → N1N2 전송 실패 → SMF 확장 버퍼링' },
     ],
-    expect: () => ({ label_ko: 'DDN Failure → 버퍼 폐기', label_en: 'DDN Failure → buffer discard' }),
+    expect: () => ({ label_ko: 'N1N2 전송 실패 → SMF 확장 버퍼링', label_en: 'N1N2 transfer fail → SMF extended buffering' }),
   },
   {
     id: 'up-end-marker-order',
@@ -3812,8 +3857,12 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: 'SMF/SBI 过载不是 NGAP Overload → 用 HTTP 503 Service Unavailable + Retry-After 控流(NGAP Overload 仅 AMF→gNB)。',
     ref: 'TS 29.500 §6.4 (503 + Retry-After) · TS 23.501 §5.19', cause: 'HTTP 503 + Retry-After (SBI overload)', domain: 'scale', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' },
-      { op: 'note', text: 'SMF 파드당 용량↓ + HPA off + 세션 대량 → 503 + Retry-After (NGAP Overload 아님)' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'nfParam', zone: 'A', nf: 'SMF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 6 },
     ],
     expect: () => ({ label_ko: 'SMF/SBI 과부하 → 503 + Retry-After', label_en: 'SMF/SBI overload → 503 + Retry-After' }),
   },
@@ -3825,8 +3874,12 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: 'UPF 过载不是 NGAP Overload → SMF 通过 PFCP Overload Control Information(OCI)降载(NGAP Overload 仅 AMF→gNB)。',
     ref: 'TS 29.244 §5.22 (PFCP Overload Control) · TS 23.501 §5.19', cause: 'PFCP Overload Control (OCI)', domain: 'scale', category: 'failure',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' },
-      { op: 'note', text: 'UPF 과부하 → PFCP OCI로 SMF 부하 저감 (NGAP Overload 아님)' },
+      { op: 'ensureRU', zone: 'A' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' },
+      { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
+      { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
+      { op: 'nfParam', zone: 'A', nf: 'UPF', patch: { replicas: 1, max_replicas: 1, capacity_per_pod: 2 } },
+      { op: 'ensurePersons', zone: 'A', count: 6 },
     ],
     expect: () => ({ label_ko: 'UPF 과부하 → PFCP OCI 저감', label_en: 'UPF overload → PFCP OCI throttling' }),
   },
@@ -4055,13 +4108,13 @@ export const SCENARIOS: Scenario[] = [
   {
     id: 'iot-nidd-buffered',
     ko: 'MT NIDD 버퍼링', en: 'MT NIDD buffered', zh: 'MT NIDD 缓冲',
-    desc_ko: 'PSM UE 대상 MT NIDD → T8 DeliveryStatus: BUFFERING_TEMPORARILY_NOT_REACHABLE (UE 도달 시 전달).',
-    desc_en: 'MT NIDD to a PSM UE → T8 DeliveryStatus: BUFFERING_TEMPORARILY_NOT_REACHABLE (delivered when UE reachable).',
-    desc_zh: '面向 PSM UE 的 MT NIDD → T8 DeliveryStatus:BUFFERING_TEMPORARILY_NOT_REACHABLE(UE 可达时递交)。',
-    ref: 'TS 29.122 T8 (NIDD DeliveryStatus)', cause: 'NIDD BUFFERING_TEMPORARILY_NOT_REACHABLE', domain: 'iot', category: 'failure',
+    desc_ko: 'PSM UE 대상 MT NIDD → T8 DeliveryStatus: BUFFERING (UE 도달 시 전달).',
+    desc_en: 'MT NIDD to a PSM UE → T8 DeliveryStatus: BUFFERING (delivered when UE reachable).',
+    desc_zh: '面向 PSM UE 的 MT NIDD → T8 DeliveryStatus:BUFFERING(UE 可达时递交)。',
+    ref: 'TS 29.122 T8 (NIDD DeliveryStatus enum = BUFFERING)', cause: 'NIDD DeliveryStatus BUFFERING', domain: 'iot', category: 'failure',
     setup: [
       { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'NEF' }, { op: 'ensureNf', zone: 'A', type: 'SMF' },
-      { op: 'note', text: 'PSM UE MT NIDD → BUFFERING_TEMPORARILY_NOT_REACHABLE' },
+      { op: 'note', text: 'PSM UE MT NIDD → T8 DeliveryStatus BUFFERING (도달 시 전달)' },
     ],
     expect: () => ({ label_ko: 'MT NIDD 버퍼링 (도달불가 임시)', label_en: 'MT NIDD buffered (temp not reachable)' }),
   },
@@ -4380,8 +4433,9 @@ export const SCENARIOS: Scenario[] = [
     desc_zh: '经 TNGF 的可信 non-3GPP 接入 → 承载 EAP-5G,推导 TNGF 密钥(NWt IPsec)。',
     ref: 'TS 23.502 §4.12a.2.2 · TS 33.501 (TNGF)', cause: 'TNGF trusted non-3GPP registration', domain: 'multirat', category: 'success',
     setup: [
-      { op: 'ensureRU', zone: 'A' }, { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' }, { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true },
-      { op: 'note', text: 'TNGF 경유 신뢰 non-3GPP 등록 (EAP-5G, NWt IPsec)' },
+      { op: 'ensureNf', zone: 'A', type: 'AMF' }, { op: 'ensureNf', zone: 'A', type: 'AUSF' }, { op: 'ensureNf', zone: 'A', type: 'UDM' },
+      { op: 'ensureNf', zone: 'A', type: 'SMF' }, { op: 'ensureNf', zone: 'A', type: 'UPF' }, { op: 'setDn', zone: 'A', on: true }, { op: 'ensureNf', zone: 'A', type: 'TNGF' },
+      { op: 'note', text: 'RU 없이 TNGF(신뢰 non-3GPP) 경유 EAP-5G 등록 → trusted non-3GPP access (NWt IPsec)' },
     ],
     expect: () => ({ label_ko: 'TNGF 신뢰 non-3GPP 등록 성공', label_en: 'TNGF trusted non-3GPP registration OK' }),
   },

@@ -66,7 +66,7 @@ export type NfType =
   | 'UDR' | 'PCF' | 'NSSF' | 'NEF' | 'SCP' | 'SMSF' | 'SEPP'
   // 추가 5GC NF — 분석·과금·바인딩·측위·비3GPP·능력·슬라이스인증
   | 'NWDAF' | 'CHF' | 'BSF' | '5G-EIR' | 'LMF' | 'GMLC'
-  | 'N3IWF' | 'AF' | 'UDSF' | 'NSSAAF' | 'UCMF'
+  | 'N3IWF' | 'TNGF' | 'AF' | 'UDSF' | 'NSSAAF' | 'UCMF'
   // IMS (VoNR 음성) — P/I/S-CSCF + 미디어게이트웨이
   | 'P-CSCF' | 'I-CSCF' | 'S-CSCF' | 'IMS-AS' | 'MGW'
   // LTE/EPC (4G, 상호연동) — PCRF/HSS/MME/SGW/PGW
@@ -99,6 +99,7 @@ export const NF_INFO: Record<NfType, { desc: string; color: string }> = {
   LMF: { desc: '측위 관리 (Location, NRPPa)', color: '#7affa0' },
   GMLC: { desc: '측위 게이트웨이 (외부 LCS)', color: '#7ac9ff' },
   N3IWF: { desc: '비3GPP 인터워킹 (Wi-Fi 액세스, N3)', color: '#c0a0ff' },
+  TNGF: { desc: '신뢰 비3GPP 게이트웨이 (Trusted WiFi, NWt/Ta)', color: '#c0b0ff' },
   AF: { desc: '애플리케이션 기능 (Naf, PCF 연동)', color: '#ffd28a' },
   UDSF: { desc: '비정형 데이터 저장 (Nudsf)', color: '#ffa0a0' },
   NSSAAF: { desc: '슬라이스별 인증·인가 (NSSAA)', color: '#a0ffb0' },
@@ -127,6 +128,16 @@ export interface NfParams {
   max_registered_ue?: number // AMF 등록 UE 상한 (TS 23.501 §5.19.5). 0/undefined = 무제한
   max_pdu_sessions?: number // SMF PDU 세션 상한 (TS 23.501 §5.6). undefined = 무제한
   t3512_min?: number // AMF 주기적 등록 갱신 타이머 (분, TS 24.501). default 54
+  implicit_dereg_min?: number // AMF implicit de-registration 타이머 (분, TS 23.501 §5.3.4). undefined = 미설정
+  t3396_min?: number // SMF/DNN back-off 타이머 (분, TS 24.501 §6.2.8). default 12
+  nrf_ttl_sec?: number // NRF NF-profile heartbeat TTL (초, TS 29.510). default 30
+  max_allowed_nssai?: number // NSSF 동시 허용 S-NSSAI 최대 개수 (TS 23.501 §5.15.4). default 8
+  auth_fail_mode?: 'none' | 'mac' | 'sync' // AUSF/UDM 인증 장애 주입 (TS 33.501; 'mac'→#20 MAC 실패, 'sync'→#21 sync 실패). default 'none'
+  n4_heartbeat_sec?: number // UPF/SMF PFCP N4 heartbeat 주기 (초, TS 29.244). 0/undefined = OFF(liveness 실패 없음) — 무차단
+  sepp_n32_secure?: boolean // SEPP N32 handshake/cert 유효 (TS 29.573). default true = 보안 OK → 로밍 허용
+  chf_quota_mb?: number // CHF 온라인 과금 부여 quota MB (TS 32.290). 0/undefined = 무제한 크레딧 — 무차단
+  pcf_default_5qi?: number // PCF 기본 QoS-flow 5QI (TS 23.501 §5.7.4). default 9
+  t3502_min?: number // AMF T3502 타이머 (분, TS 24.501). default 12
 }
 
 export const DEFAULT_MAX_REPLICAS = 16 // HPA 상한 기본값
@@ -141,7 +152,18 @@ export const DEFAULT_NF: NfParams = {
   max_replicas: DEFAULT_MAX_REPLICAS,
   throughput_per_pod: 5000, // 파드당 5 Gbps (UL+DL) 기본
   t3512_min: 54, // AMF 주기적 등록 갱신 타이머 기본 (54분)
-  // max_registered_ue / max_pdu_sessions: 미지정(무제한)
+  t3396_min: 12, // SMF/DNN back-off 타이머 기본 (12분)
+  nrf_ttl_sec: 30, // NRF NF-profile heartbeat TTL 기본 (30초)
+  max_allowed_nssai: 8, // NSSF 동시 허용 S-NSSAI 기본 (8개)
+  auth_fail_mode: 'none', // 인증 장애 주입 없음(정상)
+  max_registered_ue: 0, // 0 = 무제한(등록 상한 없음) — 기본 트래픽 허용
+  max_pdu_sessions: 0, // 0 = 무제한(세션 상한 없음)
+  implicit_dereg_min: 0, // 0 = 비활성(암시적 디레지 없음)
+  n4_heartbeat_sec: 0, // 0 = OFF(N4 liveness 실패 없음) — 무차단
+  sepp_n32_secure: true, // N32 보안/인증서 정상 → 로밍 허용
+  chf_quota_mb: 0, // 0 = 무제한 크레딧(과금 차단 없음) — 무차단
+  pcf_default_5qi: 9, // 기본 QoS-flow 5QI (non-GBR)
+  t3502_min: 12, // AMF T3502 기본 (12분)
 }
 
 // 사이트(데이터센터) 장애 상태 — geo-redundancy 절체 시뮬레이션용
@@ -179,6 +201,9 @@ export interface Slice {
   name: string
   zone: Zone
   session_ambr_mbps?: number // 세션/슬라이스 non-GBR 집계 상한 (TS 23.501 §5.7.2.6). undefined = 무제한
+  nsac_max_ues?: number // 슬라이스별 NSAC UE 수용 상한 (TS 23.501 §5.15.11 → #69). undefined = 무제한
+  slice_ambr_mbps?: number // 슬라이스-AMBR 집계 non-GBR 상한 (TS 23.501 §5.7.2.6). undefined = 무제한
+  allowed_5qi?: number[] // 이 슬라이스가 지원하는 5QI 집합 (TS 23.501 §5.7); 집합 밖 5QI 요청 → #59. undefined/빈 배열 = 전체 허용(무제한) — 무차단
 }
 export const SST_NAMES: Record<number, { ko: string; en: string; zh: string }> = {
   1: { ko: 'eMBB (대용량 광대역)', en: 'eMBB (broadband)', zh: 'eMBB (大带宽)' },
@@ -201,14 +226,21 @@ export const TRAFFIC_TYPES: {
   icon: string
   sst: number // 이 트래픽이 요구하는 슬라이스 SST
   ce?: boolean // NB-IoT/LTE-M 커버리지 확장(CE) 대상 — 심층 커버리지 반복 모델 적용
+  // 표준 5QI QoS 특성 (TS 23.501 Table 5.7.4-1) — per-5QI 표준값(피델리티).
+  // 후속 용량/물리 에이전트가 스케줄링·프리엠션·GBR 판정에 사용. 모두 표준 전형값 → 기본 흐름 무차단.
+  priority_level?: number // 5QI Priority Level (낮을수록 우선) — 해당 5QI 표준값
+  avg_window_ms?: number // Averaging Window (GBR 5QI = 2000ms, non-GBR = undefined)
+  gfbr_mbps?: number // Guaranteed Flow Bit Rate (GBR 전용; 기본 = demandMbps)
+  mfbr_mbps?: number // Maximum Flow Bit Rate (GBR 전용; 기본 = demandMbps*1.5)
+  arp_priority?: number // ARP priority level 1..15 (1=최고). 5QI 특성에서 유도
 }[] = [
-  { key: 'video', ko: '동영상 스트리밍', en: 'Video streaming', zh: '视频流', fiveqi: 8, gbr: false, demandMbps: 15, icon: '🎬', sst: 1 },
-  { key: 'voice', ko: '음성 통화(VoNR)', en: 'Voice (VoNR)', zh: '语音通话(VoNR)', fiveqi: 1, gbr: true, demandMbps: 0.1, icon: '📞', sst: 1 },
-  { key: 'realtime', ko: '실시간 서비스(게임/화상)', en: 'Real-time (game/AR)', zh: '实时业务(游戏/视频)', fiveqi: 3, gbr: true, demandMbps: 5, icon: '🎮', sst: 2 },
-  { key: 'urllc', ko: 'URLLC(산업제어)', en: 'URLLC (industrial)', zh: 'URLLC(工业控制)', fiveqi: 82, gbr: true, demandMbps: 2, icon: '🤖', sst: 2 },
-  { key: 'web', ko: '웹/브라우징', en: 'Web browsing', zh: '网页浏览', fiveqi: 9, gbr: false, demandMbps: 3, icon: '🌐', sst: 1 },
-  { key: 'file', ko: '파일 다운로드', en: 'File download', zh: '文件下载', fiveqi: 9, gbr: false, demandMbps: 50, icon: '📥', sst: 1 },
-  { key: 'iot', ko: 'NB-IoT/LTE-M(CE)', en: 'NB-IoT/LTE-M (CE)', zh: 'NB-IoT/LTE-M(CE)', fiveqi: 90, gbr: false, demandMbps: 0.05, icon: '📟', sst: 3, ce: true },
+  { key: 'video', ko: '동영상 스트리밍', en: 'Video streaming', zh: '视频流', fiveqi: 8, gbr: false, demandMbps: 15, icon: '🎬', sst: 1, priority_level: 80, arp_priority: 8 },
+  { key: 'voice', ko: '음성 통화(VoNR)', en: 'Voice (VoNR)', zh: '语音通话(VoNR)', fiveqi: 1, gbr: true, demandMbps: 0.1, icon: '📞', sst: 1, priority_level: 20, avg_window_ms: 2000, gfbr_mbps: 0.1, mfbr_mbps: 0.15, arp_priority: 2 },
+  { key: 'realtime', ko: '실시간 서비스(게임/화상)', en: 'Real-time (game/AR)', zh: '实时业务(游戏/视频)', fiveqi: 3, gbr: true, demandMbps: 5, icon: '🎮', sst: 2, priority_level: 30, avg_window_ms: 2000, gfbr_mbps: 5, mfbr_mbps: 7.5, arp_priority: 4 },
+  { key: 'urllc', ko: 'URLLC(산업제어)', en: 'URLLC (industrial)', zh: 'URLLC(工业控制)', fiveqi: 82, gbr: true, demandMbps: 2, icon: '🤖', sst: 2, priority_level: 19, avg_window_ms: 2000, gfbr_mbps: 2, mfbr_mbps: 3, arp_priority: 3 },
+  { key: 'web', ko: '웹/브라우징', en: 'Web browsing', zh: '网页浏览', fiveqi: 9, gbr: false, demandMbps: 3, icon: '🌐', sst: 1, priority_level: 90, arp_priority: 8 },
+  { key: 'file', ko: '파일 다운로드', en: 'File download', zh: '文件下载', fiveqi: 9, gbr: false, demandMbps: 50, icon: '📥', sst: 1, priority_level: 90, arp_priority: 9 },
+  { key: 'iot', ko: 'NB-IoT/LTE-M(CE)', en: 'NB-IoT/LTE-M (CE)', zh: 'NB-IoT/LTE-M(CE)', fiveqi: 90, gbr: false, demandMbps: 0.05, icon: '📟', sst: 3, ce: true, priority_level: 90, arp_priority: 9 },
 ]
 export function trafficInfo(t: TrafficType) {
   return TRAFFIC_TYPES.find((x) => x.key === t) ?? TRAFFIC_TYPES[0]
@@ -273,6 +305,40 @@ export interface GnbParams {
   // 셀 선택/차단 (SIB1) — 접속성 게이팅
   cell_barred?: boolean // SIB1 cellBarred (TS 38.331). true면 이 셀 접속 금지
   q_rx_lev_min_dbm?: number // SIB1 cellSelectionInfo Qrxlevmin (TS 38.304). 셀 선택 최소 수신 레벨
+  // MIMO/안테나 배열 (TS 38.211/214, TR 38.901 §7.3) — mimo4x4 boolean을 개념적으로 대체
+  mimo_layers?: number // 명시적 DL MIMO 레이어/rank (1/2/4/8). default 2
+  ant_rows?: number // 안테나 배열 행 수 (TR 38.901 §7.3). default 1
+  ant_cols?: number // 안테나 배열 열 수. default 1 (1×1 = 베이스라인, 무차단)
+  // per-cell 이동성/측정 오버라이드 (미지정 시 전역 mobility 기본값 사용, TS 38.331)
+  a2_threshold_dbm?: number // A2: 서빙<임계 시 이벤트 (셀 이탈)
+  a1_threshold_dbm?: number // A1: 서빙>임계 시 이벤트 (측정 중단)
+  a4_threshold_dbm?: number // A4: 이웃>임계 시 이벤트
+  a5_thresh1_dbm?: number // A5: 서빙<thresh1
+  a5_thresh2_dbm?: number // A5: 이웃>thresh2
+  t300_ms?: number // RRCSetupRequest 타이머
+  t304_ms?: number // 핸드오버 타이머
+  t310_ms?: number // 물리계층 문제 타이머
+  t311_ms?: number // RRC 재확립 타이머
+  n310?: number // 연속 out-of-sync 카운트
+  n311?: number // 연속 in-sync 카운트
+  ra_response_window_ms?: number // RAR 수신 윈도우
+  rlc_max_retx?: number // RLC 최대 재전송
+  ssb_periodicity_ms?: number // SSB 주기
+  sib1_periodicity_ms?: number // SIB1 주기
+  filter_coef_k?: number // L3 필터 계수 (filterCoefficient)
+  cho_exec_offset_db?: number // Conditional HO 실행 오프셋
+  pingpong_min_stay_ms?: number // 핑퐁 방지 최소 체류 시간
+  report_interval_ms?: number // 측정 보고 주기
+  gap_period_ms?: number // 측정 갭 주기
+  gap_length_ms?: number // 측정 갭 길이
+  // per-cell RF 수신기 오버라이드 (미지정 시 전역 rf 기본값, TS 38.104/38.214)
+  noise_figure_db?: number // 수신기 잡음 지수
+  target_bler?: number // 목표 BLER (링크 적응)
+  interference_margin_db?: number // 간섭 마진
+  // per-cell 전파환경 오버라이드 (미지정 시 전역 rf 기본값, TR 38.901). 셀별 국소 환경/가정 UE Pmax.
+  path_loss_exp?: number // 경로손실 지수 n (셀 국소 환경)
+  shadow_sigma_db?: number // 쉐도우 페이딩 σ (셀 국소)
+  ue_pmax_dbm?: number // 이 셀이 가정하는 UE 최대 송신출력 (UL 링크버짓)
 }
 
 // NR 주파수 레인지 (3GPP TS 38.104). FR1=sub-6GHz, FR2=mmWave.
@@ -869,4 +935,7 @@ export const DEFAULT_GNB: GnbParams = {
   pdcp_duplication: false,
   cell_barred: false,
   q_rx_lev_min_dbm: -120,
+  mimo_layers: 2, // DL MIMO 레이어/rank 기본 (2레이어) — 비차단
+  ant_rows: 1, // 안테나 배열 행 (1×1 베이스라인)
+  ant_cols: 1, // 안테나 배열 열 (1×1 베이스라인)
 }

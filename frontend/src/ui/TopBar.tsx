@@ -200,7 +200,7 @@ export function TopBar() {
         <div className="tb-label">{pick(lang, '네트워크 설정', 'Network', '网络设置')}</div>
         <div className="seg">
           <button className={showCore ? 'on' : ''} onClick={() => { setShowCore(true); bumpPanel('core') }}
-            title={pick(lang, '5G Core 구성(논리) — NF 추가·레플리카·HA/HPA·슬라이스·IMSI 등록', '5G Core config (logical) — NFs, replicas, HA/HPA, slices, IMSI registry', '5G核心网配置(逻辑) — NF·副本·HA/HPA·切片·IMSI注册')}>☁ Core</button>
+            title={pick(lang, 'RAN/Core 구성 — 지역별 Core(NF·슬라이스·IMSI) + RAN(gNB/eNB/RU·CU/DU 노드별 파라미터)', 'RAN/Core config — per-zone Core (NFs, slices, IMSI) + RAN (per-node gNB/eNB/RU, CU/DU params)', 'RAN/Core 配置 — 分区Core(NF·切片·IMSI) + RAN(gNB/eNB/RU·CU/DU 逐节点参数)')}>☁ RAN/Core</button>
           <button className={showCall || callActive ? 'on' : ''} onClick={() => { setShowCall(true); bumpPanel('call') }}
             title={pick(lang, 'VoNR 음성통화 — 두 측정요원 간 통화 발신/종료·상태 확인', 'VoNR voice call — place/end a call between two test UEs', 'VoNR语音通话 — 两个测试终端间发起/结束通话')}>
             📞 {callActive ? pick(lang, '통화중', 'In call', '通话中') : pick(lang, '통화', 'Call', '通话')}

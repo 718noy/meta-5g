@@ -57,6 +57,47 @@ function Num({
   )
 }
 
+// per-cell 오버라이드용 숫자 입력 — 비우면 undefined(전역 기본값 폴백). 0을 강제하지 않는다.
+// 값이 undefined면 빈 칸으로 표시하고 placeholder로 "전역값" 힌트를 보여준다.
+function NumOpt({
+  label, value, min, max, step, unit, onChange, title, placeholder,
+}: {
+  label: string
+  value: number | undefined
+  min: number
+  max: number
+  step: number
+  unit?: string
+  onChange: (v: number | undefined) => void
+  title?: string
+  placeholder?: string
+}) {
+  return (
+    <label className="field" title={title}>
+      <span>
+        {label} {unit && <em>({unit})</em>}
+      </span>
+      <input
+        type="number"
+        value={value ?? ''}
+        min={min}
+        max={max}
+        step={step}
+        placeholder={placeholder}
+        onChange={(e) => {
+          const raw = e.target.value
+          if (raw.trim() === '') {
+            onChange(undefined) // 비움 → undefined (전역 RAN/RF 기본값 사용)
+            return
+          }
+          const v = parseFloat(raw)
+          if (!Number.isNaN(v)) onChange(Math.min(Math.max(v, min), max))
+        }}
+      />
+    </label>
+  )
+}
+
 function GnbParamsEditor({ obj }: { obj: SceneObject }) {
   const t = useT()
   const lang = useStore((s) => s.lang)
@@ -353,6 +394,34 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
         <input type="checkbox" checked={g.mimo4x4}
           onChange={(e) => updateGnb(obj.id, { mimo4x4: e.target.checked })} />
       </label>
+      {/* MIMO 레이어/랭크 + 안테나 어레이 (rows×cols) — mimo4x4 토글을 대체하는 상세 RF 파라미터 */}
+      <Num label={pick(lang, 'MIMO 레이어 (layers/rank)', 'MIMO layers (rank)', 'MIMO层数 (rank)')}
+        unit="layers" value={g.mimo_layers ?? 2} min={1} max={8} step={1}
+        title={pick(lang,
+          'DL 공간 레이어/랭크 수. 높을수록 피크 처리량 비례 증가(랭크 상한 8). TS 38.211/214. (mimo4x4 토글 대체)',
+          'DL 공간 레이어/랭크 수. 높을수록 피크 처리량 비례 증가(랭크 상한 8). TS 38.211/214. (mimo4x4 토글 대체)',
+          'DL 공간 레이어/랭크 수. 높을수록 피크 처리량 비례 증가(랭크 상한 8). TS 38.211/214. (mimo4x4 토글 대체)')}
+        onChange={(v) => updateGnb(obj.id, { mimo_layers: Math.round(v) })} />
+      <Num label={pick(lang, '안테나 어레이 행 (rows)', 'Antenna array rows', '天线阵列行 (rows)')}
+        unit="rows" value={g.ant_rows ?? 1} min={1} max={8} step={1}
+        title={pick(lang,
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 행 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
+        onChange={(v) => updateGnb(obj.id, { ant_rows: Math.round(v) })} />
+      <Num label={pick(lang, '안테나 어레이 열 (cols)', 'Antenna array cols', '天线阵列列 (cols)')}
+        unit="cols" value={g.ant_cols ?? 1} min={1} max={8} step={1}
+        title={pick(lang,
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.',
+          '안테나 어레이 열 수. 어레이 이득 +10log10(행×열) dB → 커버리지↑. TR 38.901.')}
+        onChange={(v) => updateGnb(obj.id, { ant_cols: Math.round(v) })} />
+      <div className="material-note">
+        {pick(lang,
+          'mimo4x4 토글은 레거시(하위호환용 유지) — 실제 처리량은 위 MIMO 레이어 수로 결정됩니다.',
+          'mimo4x4 toggle is legacy (kept for back-compat) — throughput now follows the MIMO layers above.',
+          'mimo4x4 开关为旧版(为向后兼容保留) — 吞吐量现由上方MIMO层数决定。')}
+      </div>
       <label className="field checkbox" title={pick(lang, '에너지 절감 — 저부하 시 셀 출력/자원 절약', 'Energy saving — trims cell power/resources under low load', '节能 — 低负载时节省小区功率/资源')}>
         <span>{t('feat_es')}</span>
         <input type="checkbox" checked={g.energy_saving}
@@ -387,6 +456,150 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
           'A3: HO when neighbor RSRP > serving + Offset + Hysteresis sustained for TTT. CIO shifts this cell boundary.',
           'A3: 邻区 RSRP > 服务小区 + Offset + Hysteresis 且持续 TTT 时切换。CIO 单独调整本小区边界。')}
       </div>
+
+      {/* per-cell 이동성/측정 오버라이드 (TS 38.331). 비우면 RAN 전역 기본값 폴백 (undefined). */}
+      <div className="section-label sub-bold">
+        📐 {pick(lang,
+          '이동성/측정 (per-cell 오버라이드, TS 38.331)',
+          'Mobility/measurement (per-cell override, TS 38.331)',
+          '移动性/测量 (per-cell 覆盖, TS 38.331)')}
+      </div>
+      <div className="material-note">
+        {pick(lang,
+          '미입력 시 RAN 전역 기본값 사용 (칸을 비우면 전역값으로 폴백). TS 38.331.',
+          'Empty = fall back to the global RAN default (clear a field to use the global value). TS 38.331.',
+          '留空则使用RAN全局默认值 (清空该项即回退到全局值)。TS 38.331。')}
+      </div>
+      <NumOpt label="A1 threshold" unit="dBm" value={g.a1_threshold_dbm} min={-140} max={-30} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'A1: 서빙 RSRP > 임계 시 이벤트(측정 중단). 미입력 시 전역값. TS 38.331 §5.5.4.2.', 'A1: serving RSRP above threshold (stop measurement). Empty = global. TS 38.331 §5.5.4.2.', 'A1: 服务RSRP高于门限(停止测量)。留空=全局。TS 38.331 §5.5.4.2。')}
+        onChange={(v) => updateGnb(obj.id, { a1_threshold_dbm: v })} />
+      <NumOpt label="A2 threshold" unit="dBm" value={g.a2_threshold_dbm} min={-140} max={-30} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'A2: 서빙 RSRP < 임계 시 이벤트(셀 이탈). 미입력 시 전역값. TS 38.331 §5.5.4.3.', 'A2: serving RSRP below threshold (leaving cell). Empty = global. TS 38.331 §5.5.4.3.', 'A2: 服务RSRP低于门限(离开小区)。留空=全局。TS 38.331 §5.5.4.3。')}
+        onChange={(v) => updateGnb(obj.id, { a2_threshold_dbm: v })} />
+      <NumOpt label="A4 threshold" unit="dBm" value={g.a4_threshold_dbm} min={-140} max={-30} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'A4: 이웃 RSRP > 임계 시 이벤트. 미입력 시 전역값. TS 38.331 §5.5.4.5.', 'A4: neighbor RSRP above threshold. Empty = global. TS 38.331 §5.5.4.5.', 'A4: 邻区RSRP高于门限。留空=全局。TS 38.331 §5.5.4.5。')}
+        onChange={(v) => updateGnb(obj.id, { a4_threshold_dbm: v })} />
+      <NumOpt label="A5 threshold-1" unit="dBm" value={g.a5_thresh1_dbm} min={-140} max={-30} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'A5 Thr1: 서빙 RSRP < thresh1. 미입력 시 전역값. TS 38.331 §5.5.4.6.', 'A5 Thr1: serving RSRP below thresh1. Empty = global. TS 38.331 §5.5.4.6.', 'A5 Thr1: 服务RSRP低于thresh1。留空=全局。TS 38.331 §5.5.4.6。')}
+        onChange={(v) => updateGnb(obj.id, { a5_thresh1_dbm: v })} />
+      <NumOpt label="A5 threshold-2" unit="dBm" value={g.a5_thresh2_dbm} min={-140} max={-30} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'A5 Thr2: 이웃 RSRP > thresh2. 미입력 시 전역값. TS 38.331 §5.5.4.6.', 'A5 Thr2: neighbor RSRP above thresh2. Empty = global. TS 38.331 §5.5.4.6.', 'A5 Thr2: 邻区RSRP高于thresh2。留空=全局。TS 38.331 §5.5.4.6。')}
+        onChange={(v) => updateGnb(obj.id, { a5_thresh2_dbm: v })} />
+      <NumOpt label="T300" unit="ms" value={g.t300_ms} min={0} max={2000} step={50}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'T300: RRCSetupRequest 후 대기 타이머. 미입력 시 전역값. TS 38.331 §7.1.', 'T300: timer after RRCSetupRequest. Empty = global. TS 38.331 §7.1.', 'T300: RRCSetupRequest后等待定时器。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { t300_ms: v })} />
+      <NumOpt label="T304" unit="ms" value={g.t304_ms} min={0} max={8000} step={50}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'T304: 핸드오버 실행 타이머(만료 시 HO 실패→재확립). 미입력 시 전역값. TS 38.331 §7.1.', 'T304: handover execution timer (expiry → HO failure/re-establishment). Empty = global. TS 38.331 §7.1.', 'T304: 切换执行定时器(超时→切换失败/重建)。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { t304_ms: v })} />
+      <NumOpt label="T310" unit="ms" value={g.t310_ms} min={0} max={8000} step={50}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'T310: 물리계층 문제 지속 타이머(N310 후 시작, 만료 시 RLF). 미입력 시 전역값. TS 38.331 §7.1.', 'T310: physical-layer problem timer (starts after N310; expiry → RLF). Empty = global. TS 38.331 §7.1.', 'T310: 物理层问题定时器(N310后启动，超时→RLF)。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { t310_ms: v })} />
+      <NumOpt label="T311" unit="ms" value={g.t311_ms} min={0} max={30000} step={100}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'T311: RRC 재확립 셀 탐색 타이머. 미입력 시 전역값. TS 38.331 §7.1.', 'T311: RRC re-establishment cell-search timer. Empty = global. TS 38.331 §7.1.', 'T311: RRC重建小区搜索定时器。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { t311_ms: v })} />
+      <NumOpt label="N310" unit="회" value={g.n310} min={1} max={20} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'N310: 연속 out-of-sync 지시 횟수(초과 시 T310 시작). 미입력 시 전역값. TS 38.331 §7.1.', 'N310: consecutive out-of-sync count (exceed → start T310). Empty = global. TS 38.331 §7.1.', 'N310: 连续失步指示计数(超过→启动T310)。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { n310: v == null ? undefined : Math.round(v) })} />
+      <NumOpt label="N311" unit="회" value={g.n311} min={1} max={20} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'N311: 연속 in-sync 지시 횟수(초과 시 T310 정지). 미입력 시 전역값. TS 38.331 §7.1.', 'N311: consecutive in-sync count (exceed → stop T310). Empty = global. TS 38.331 §7.1.', 'N311: 连续同步指示计数(超过→停止T310)。留空=全局。TS 38.331 §7.1。')}
+        onChange={(v) => updateGnb(obj.id, { n311: v == null ? undefined : Math.round(v) })} />
+      <NumOpt label="RA response window" unit="ms" value={g.ra_response_window_ms} min={1} max={80} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'ra-ResponseWindow: RAR 수신 대기 윈도우. 미입력 시 전역값. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR reception window. Empty = global. TS 38.331 §6.3.2.', 'ra-ResponseWindow: RAR接收窗口。留空=全局。TS 38.331 §6.3.2。')}
+        onChange={(v) => updateGnb(obj.id, { ra_response_window_ms: v })} />
+      <NumOpt label="RLC maxRetxThreshold" unit="회" value={g.rlc_max_retx} min={1} max={64} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'maxRetxThreshold: RLC AM 최대 재전송(초과 시 RLF). 미입력 시 전역값. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM max retransmissions (exceed → RLF). Empty = global. TS 38.322/38.331.', 'maxRetxThreshold: RLC AM最大重传(超过→RLF)。留空=全局。TS 38.322/38.331。')}
+        onChange={(v) => updateGnb(obj.id, { rlc_max_retx: v == null ? undefined : Math.round(v) })} />
+      <NumOpt label="SSB periodicity" unit="ms" value={g.ssb_periodicity_ms} min={5} max={160} step={5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'ssb-PeriodicityServingCell: SSB 버스트 주기(5/10/20/40/80/160). 미입력 시 전역값. TS 38.331.', 'ssb-PeriodicityServingCell: SSB burst period (5/10/20/40/80/160). Empty = global. TS 38.331.', 'ssb-PeriodicityServingCell: SSB突发周期(5/10/20/40/80/160)。留空=全局。TS 38.331。')}
+        onChange={(v) => updateGnb(obj.id, { ssb_periodicity_ms: v })} />
+      <NumOpt label="SIB1 periodicity" unit="ms" value={g.sib1_periodicity_ms} min={5} max={160} step={5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'SIB1 반복 주기(기본 20ms). 미입력 시 전역값. TS 38.331 §5.2.2.', 'SIB1 repetition period (default 20ms). Empty = global. TS 38.331 §5.2.2.', 'SIB1重复周期(默认20ms)。留空=全局。TS 38.331 §5.2.2。')}
+        onChange={(v) => updateGnb(obj.id, { sib1_periodicity_ms: v })} />
+      <NumOpt label="L3 filter coefficient k" unit="k" value={g.filter_coef_k} min={0} max={19} step={1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'filterCoefficient k: L3 측정 필터 계수(가중치 1/2^(k/4)). 클수록 평활↑·반응↓. 미입력 시 전역값. TS 38.331 §5.5.3.2.', 'filterCoefficient k: L3 measurement filter coeff (weight 1/2^(k/4)); higher = smoother/slower. Empty = global. TS 38.331 §5.5.3.2.', 'filterCoefficient k: L3测量滤波系数(权重1/2^(k/4))；越大越平滑越慢。留空=全局。TS 38.331 §5.5.3.2。')}
+        onChange={(v) => updateGnb(obj.id, { filter_coef_k: v == null ? undefined : Math.round(v) })} />
+      <NumOpt label="CHO exec offset" unit="dB" value={g.cho_exec_offset_db} min={0} max={15} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'Conditional HO 실행 오프셋 — 조건 충족 후 실제 실행 여유. 미입력 시 전역값. TS 38.331 §5.3.5.13.', 'Conditional HO execution offset — margin before actually executing after condition met. Empty = global. TS 38.331 §5.3.5.13.', '条件切换执行偏置 — 条件满足后实际执行余量。留空=全局。TS 38.331 §5.3.5.13。')}
+        onChange={(v) => updateGnb(obj.id, { cho_exec_offset_db: v })} />
+      <NumOpt label={pick(lang, '핑퐁 최소 체류', 'Ping-pong min-stay', '乒乓最小驻留')} unit="ms" value={g.pingpong_min_stay_ms} min={0} max={10000} step={100}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '핸드오버 후 최소 체류 시간 — 이 시간 내 재HO를 핑퐁으로 억제. 미입력 시 전역값. TS 38.331(MTS).', 'Minimum stay time after handover — suppresses re-HO within this window as ping-pong. Empty = global. TS 38.331 (MTS).', '切换后最小驻留时间 — 此窗口内的再切换视为乒乓抑制。留空=全局。TS 38.331(MTS)。')}
+        onChange={(v) => updateGnb(obj.id, { pingpong_min_stay_ms: v })} />
+      <NumOpt label={pick(lang, '측정 보고 주기', 'Report interval', '测量报告周期')} unit="ms" value={g.report_interval_ms} min={120} max={30720} step={40}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'reportInterval: periodic 측정 보고 주기. 미입력 시 전역값. TS 38.331 §5.5.5.', 'reportInterval: periodic measurement report interval. Empty = global. TS 38.331 §5.5.5.', 'reportInterval: 周期测量报告间隔。留空=全局。TS 38.331 §5.5.5。')}
+        onChange={(v) => updateGnb(obj.id, { report_interval_ms: v })} />
+      <NumOpt label={pick(lang, '측정 갭 주기 (MGRP)', 'Gap period (MGRP)', '测量间隙周期 (MGRP)')} unit="ms" value={g.gap_period_ms} min={20} max={160} step={20}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'Measurement Gap Repetition Period — 인터주파수 측정 갭 주기. 미입력 시 전역값. TS 38.133 §9.1.', 'Measurement Gap Repetition Period — inter-frequency measurement gap period. Empty = global. TS 38.133 §9.1.', '测量间隙重复周期 — 异频测量间隙周期。留空=全局。TS 38.133 §9.1。')}
+        onChange={(v) => updateGnb(obj.id, { gap_period_ms: v })} />
+      <NumOpt label={pick(lang, '측정 갭 길이 (MGL)', 'Gap length (MGL)', '测量间隙长度 (MGL)')} unit="ms" value={g.gap_length_ms} min={1} max={20} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, 'Measurement Gap Length — 갭당 측정 시간(길수록 처리량 손실↑). 미입력 시 전역값. TS 38.133 §9.1.', 'Measurement Gap Length — per-gap measurement time (longer = more throughput loss). Empty = global. TS 38.133 §9.1.', '测量间隙长度 — 每间隙测量时间(越长吞吐损失越大)。留空=全局。TS 38.133 §9.1。')}
+        onChange={(v) => updateGnb(obj.id, { gap_length_ms: v })} />
+
+      {/* per-cell RF 수신기 오버라이드 (TS 38.104/38.214). 비우면 전역 RF 기본값 폴백. */}
+      <div className="section-label sub-bold">
+        📡 {pick(lang,
+          'RF 수신 (per-cell override)',
+          'RF reception (per-cell override)',
+          'RF 接收 (per-cell 覆盖)')}
+      </div>
+      <div className="material-note">
+        {pick(lang,
+          '미입력 시 전역 RF 기본값 사용 (TS 38.104/38.214).',
+          'Empty = global RF default (TS 38.104/38.214).',
+          '留空则使用全局RF默认值 (TS 38.104/38.214)。')}
+      </div>
+      <NumOpt label={pick(lang, '잡음 지수 (NF)', 'Noise figure (NF)', '噪声系数 (NF)')} unit="dB" value={g.noise_figure_db} min={0} max={15} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '수신기 잡음 지수 — 클수록 잡음 바닥↑·SINR↓·커버리지↓. 미입력 시 전역값. TS 38.104.', 'Receiver noise figure — higher raises noise floor, lowers SINR/coverage. Empty = global. TS 38.104.', '接收机噪声系数 — 越大噪声基底越高，SINR/覆盖越低。留空=全局。TS 38.104。')}
+        onChange={(v) => updateGnb(obj.id, { noise_figure_db: v })} />
+      <NumOpt label={pick(lang, '목표 BLER', 'Target BLER', '目标BLER')} unit="0~1" value={g.target_bler} min={0.001} max={0.5} step={0.01}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '링크 적응 목표 BLER(초기송신, 통상 0.1). 낮출수록 견고·처리량↓. 미입력 시 전역값. TS 38.214.', 'Link-adaptation target BLER (initial tx, typ. 0.1). Lower = more robust but lower throughput. Empty = global. TS 38.214.', '链路自适应目标BLER(初传，通常0.1)。越低越稳健但吞吐越低。留空=全局。TS 38.214。')}
+        onChange={(v) => updateGnb(obj.id, { target_bler: v })} />
+      <NumOpt label={pick(lang, '간섭 마진', 'Interference margin', '干扰余量')} unit="dB" value={g.interference_margin_db} min={0} max={20} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '링크버짓 간섭 마진 — 셀 부하/인접셀 간섭 여유(클수록 유효 SINR↓). 미입력 시 전역값. TS 38.214.', 'Link-budget interference margin — headroom for cell load/inter-cell interference (higher lowers effective SINR). Empty = global. TS 38.214.', '链路预算干扰余量 — 小区负载/邻区干扰余量(越大有效SINR越低)。留空=全局。TS 38.214。')}
+        onChange={(v) => updateGnb(obj.id, { interference_margin_db: v })} />
+
+      {/* per-cell 전파환경 오버라이드 (TR 38.901 / TS 38.101-1). 비우면 전역 RF 기본값 폴백. */}
+      <div className="section-label sub-bold">
+        🌐 {pick(lang,
+          '전파환경 (per-cell)',
+          'Propagation (per-cell)',
+          '传播环境 (per-cell)')}
+      </div>
+      <NumOpt label={pick(lang, '경로손실 지수 n', 'Path-loss exponent n', '路径损耗指数 n')} unit="n" value={g.path_loss_exp} min={1.5} max={6} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '경로손실 지수 n (셀 국소 환경, TR 38.901). 미입력=전역', 'Path-loss exponent n (cell-local environment, TR 38.901). Empty = global.', '路径损耗指数 n (小区局部环境, TR 38.901)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { path_loss_exp: v })} />
+      <NumOpt label={pick(lang, '쉐도우 페이딩 σ', 'Shadow fading σ', '阴影衰落 σ')} unit="dB" value={g.shadow_sigma_db} min={0} max={12} step={0.1}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '쉐도우 페이딩 σ (셀 국소, TR 38.901). 미입력=전역', 'Shadow fading σ (cell-local, TR 38.901). Empty = global.', '阴影衰落 σ (小区局部, TR 38.901)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { shadow_sigma_db: v })} />
+      <NumOpt label={pick(lang, 'UE 최대 송신출력 Pmax', 'UE max Tx power Pmax', 'UE 最大发射功率 Pmax')} unit="dBm" value={g.ue_pmax_dbm} min={0} max={33} step={0.5}
+        placeholder={pick(lang, '전역값', 'global', '全局')}
+        title={pick(lang, '이 셀 가정 UE 최대 송신출력 Pmax (UL 링크버짓, TS 38.101-1). 미입력=전역', 'Assumed UE max Tx power Pmax for this cell (UL link budget, TS 38.101-1). Empty = global.', '本小区假定UE最大发射功率Pmax (UL链路预算, TS 38.101-1)。留空=全局。')}
+        onChange={(v) => updateGnb(obj.id, { ue_pmax_dbm: v })} />
     </>
   )
 }

@@ -252,7 +252,7 @@ export function buildProcedure(ctx: ProcCtx): Procedure {
       { k: 'AM policy', v: 'RFSP, service-area-restriction' },
       { k: 'UE policy (URSP)', v: 'traffic → S-NSSAI/DNN routing rules' },
       { k: 'SM policy', v: inCall ? 'PCC: QFI=2 5QI1 GBR (voice)' : 'PCC: default 5QI9' },
-      { k: 'Rx (N5)', v: inCall ? 'AF/P-CSCF AAR → dedicated QoS' : '—' },
+      { k: 'N5 (Npcf_PolicyAuthorization)', v: inCall ? 'AF/P-CSCF → dedicated QoS Flow' : '—' },
     ])
     cpNode('CHF', 'chf', ['smf'], [
       { k: 'Service', v: 'Nchf_ConvergedCharging (N40)' },
@@ -395,7 +395,7 @@ export function buildProcedure(ctx: ProcCtx): Procedure {
           { k: 'IMPU', v: `sip:${supi}@ims.mnc0${ueSim.mnc}.mcc${ueSim.mcc}.3gppnetwork.org` },
           { k: 'IMPI', v: `${imsi}@ims.mnc0${ueSim.mnc}.mcc${ueSim.mcc}.3gppnetwork.org` },
           { k: 'P-CSCF addr', v: '10.45.0.10:5060 (SIP/UDP)' },
-          { k: 'Signaling', v: 'SIP · Rx(PCF) 연동' },
+          { k: 'Signaling', v: 'SIP · N5(Npcf_PolicyAuthorization) 연동' },
           { k: 'Media (RTP)', v: 'AMR-WB · 5QI=1 (GBR)' },
           { k: 'SigComp', v: 'enabled' },
         ],

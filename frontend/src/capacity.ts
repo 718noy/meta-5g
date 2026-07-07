@@ -67,7 +67,9 @@ function personThroughput(
   }
   const g = ru.gnb!
   const qamCap = g.qam256 ? 7.4 : 5.55
-  const layers = g.mimo4x4 ? 4 : 2
+  // DL 레이어 수: 백엔드 physics와 일치하도록 mimo_layers를 우선(≤8 클램프),
+  // 미지정 시 기존 mimo4x4 파생값으로 폴백(기본 2 → 현행 동작 유지).
+  const layers = Math.min(g.mimo_layers ?? (g.mimo4x4 ? 4 : 2), 8)
   // SCS 수비학 반영 유효 대역폭(백엔드 물리와 일치) — nominal BW 대신 사용해 SCS가 용량/UPF 부하에 반영되도록.
   const bwEff = effectiveBwMhz(g.bandwidth_mhz, g.scs_khz) * (g.ca_enabled ? 2 : 1)
   const dlRatio = g.tdd_dl_ratio ?? 0.75
@@ -126,6 +128,9 @@ export function useCapacitySim() {
   const nwdafTick = useRef(0) // SECTION B: NWDAF 주기 분석 로그 스로틀 (매 틱=1s, N틱마다 방출)
   const droppedUes = useRef<Set<string>>(new Set()) // RSRP/RAN 경로 상실로 "드롭" 상태인 배치 UE id (전이 시에만 로깅)
   const pduRejectedUes = useRef<Set<string>>(new Set()) // SMF 세션 한도 초과로 #26 거부된 UE id (전이 시에만 로깅)
+  const nsacRejectedUes = useRef<Set<string>>(new Set()) // 슬라이스 NSAC 한도 초과로 #69 거부된 UE id (전이 시에만 로깅)
+  const qos5qiRejectedUes = useRef<Set<string>>(new Set()) // 슬라이스 allowed_5qi 밖 5QI → #59 거부된 UE id (전이 시에만 로깅)
+  const arpPreemptedUes = useRef<Set<string>>(new Set()) // ARP 프리엠션으로 선점된 GBR UE id (전이 시에만 로깅)
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -148,6 +153,25 @@ export function useCapacitySim() {
       const tiOf = (id: string) => trafficInfo(st.personTrafficType[id] ?? st.trafficType)
       const sliceHas = (zone: Zone, sst: number) =>
         st.slices.some((s) => s.zone === zone && s.sst === sst)
+
+      // 활성 통화를 안전하게 드롭(틱당 1회) + 드롭된 party의 traffic 해제 배치. 아래 배치-UE 강제 루프와
+      // ARP 프리엠션(RU 루프)이 공유하므로 선언을 여기로 끌어올린다. (Fix 3: 틱당 최대 1회 endCall)
+      let callDropped = false
+      const clearTraffic: string[] = [] // Fix 2: 통화 party로 드롭된 UE의 personTraffic 해제 대상
+      const dropActiveCall = (uid: string): string[] => {
+        if (callDropped) return []
+        const live = useStore.getState().call
+        if (live && (live.fromId === uid || live.toId === uid)) {
+          const parties = [live.fromId, live.toId]
+          st.endCall()
+          callDropped = true
+          return parties
+        }
+        return []
+      }
+      // 이번 틱 #59(미지원 5QI) / ARP 프리엠션 거부 집합 — droppedUes식 전이 로깅용
+      const q5qiNowRejected = new Set<string>()
+      const arpNowPreempted = new Set<string>()
 
       for (const zone of ZONES) {
         const rus = st.objects.filter(
@@ -178,7 +202,7 @@ export function useCapacitySim() {
 
           // 셀 피크 용량 (Mbps) — 대역폭 × 스펙트럼효율 × 레이어 × 실효율
           const qam = g.qam256 ? 7.4 : 5.55
-          const layers = g.mimo4x4 ? 4 : 2
+          const layers = Math.min(g.mimo_layers ?? (g.mimo4x4 ? 4 : 2), 8)
           const bwEff = g.bandwidth_mhz * (g.ca_enabled ? 2 : 1)
           const dlRatio = g.tdd_dl_ratio ?? 0.75
           // TDD DL 비율 반영(per-UE radioRate와 일관) + BW=0 시 NaN 방지 하한
@@ -207,7 +231,7 @@ export function useCapacitySim() {
           } else if (rejectImsi.length === 0) warned.current[`imsi-${r.id}`] = false
           // 슬라이스 미프로비저닝 UE는 PDU 세션 거부(#91) → 트래픽 0
           const rejectSlice: string[] = []
-          const grantIds: string[] = []
+          let grantIds: string[] = []
           for (const id of registered) {
             if (sliceHas(zone, tiOf(id).sst)) grantIds.push(id)
             else { rejectSlice.push(id); personMbps[id] = 0 }
@@ -223,10 +247,47 @@ export function useCapacitySim() {
               'NSSF')
           } else if (rejectSlice.length === 0) warned.current[`slice-${r.id}`] = false
 
+          // ---- 미지원 5QI → PDU 세션 거부 #59 (TS 24.501 5GSM #59 Unsupported 5QI value; 5QI 집합 TS 23.501 §5.7) ----
+          // UE 트래픽의 슬라이스(zone+SST)에 allowed_5qi가 설정(&&비어있지 않음)되어 있고 그 UE의 fiveqi가
+          // 집합 밖이면 세션 거부(personMbps=0). allowed_5qi 미설정/빈 배열 = 전체 허용(무차단). 기본 OFF.
+          grantIds = grantIds.filter((id) => {
+            const ti = tiOf(id)
+            const slice = st.slices.find((s) => s.zone === zone && s.sst === ti.sst)
+            const allow = slice?.allowed_5qi
+            if (allow && allow.length > 0 && !allow.includes(ti.fiveqi)) {
+              q5qiNowRejected.add(id)
+              personMbps[id] = 0
+              if (!qos5qiRejectedUes.current.has(id)) {
+                qos5qiRejectedUes.current.add(id)
+                const im = st.personImsi[id] ?? defaultImsi(st.ueSim)
+                const nm = st.objects.find((o) => o.id === id)?.name ?? id
+                st.addEvent('NF', 'error',
+                  pick(st.lang,
+                    `${nm}: PDU 세션 거부 — 미지원 5QI (5GSM #59 Unsupported 5QI value) — 5QI ${ti.fiveqi} ∉ 슬라이스 허용집합`,
+                    `${nm}: PDU session rejected — Unsupported 5QI value (5GSM #59) — 5QI ${ti.fiveqi} not in slice allowed set`,
+                    `${nm}: PDU 会话拒绝 — 不支持的 5QI (5GSM #59 Unsupported 5QI value) — 5QI ${ti.fiveqi} 不在切片允许集`),
+                  nm, undefined, im)
+              }
+              return false
+            }
+            return true
+          })
+
           // 각 UE의 무선품질 상한 (SINR 기반) + 요구 대역폭(종류별)
           const radioRate: Record<string, number> = {}
           const want: Record<string, number> = {}
           const ceInfo: Record<string, ReturnType<typeof ceLadderClient>> = {}
+          // 트래픽 도착 모델(TS 23.501 트래픽 소스 근사) — per-UE per-tick 수요 배율.
+          //   constant(기본): 1.0 상시 만점 흐름(현행 동작 유지, 무차단).
+          //   poisson: demandMbps 주변 변동(~[0.3,1.5], mean~1) — 버스티 도착 근사.
+          //   onoff: per-UE on/off 듀티 사이클(full 수요 버스트 ↔ idle).
+          // 런타임 앱이므로 Math.random 사용 가능.
+          const arrivalFactor = (): number => {
+            const m = st.qos.arrival_model
+            if (m === 'poisson') return 0.3 + Math.random() * 1.2 // ~[0.3,1.5], mean≈0.9
+            if (m === 'onoff') return Math.random() < 0.6 ? 1 : 0 // 듀티 ~0.6: 버스트(full) ↔ idle
+            return 1 // constant
+          }
           for (const id of grantIds) {
             const obj = st.objects.find((o) => o.id === id)!
             const ti = tiOf(id)
@@ -242,7 +303,7 @@ export function useCapacitySim() {
             } else {
               radioRate[id] = personThroughput(obj, st.sims[zone], rus)
             }
-            want[id] = Math.min(ti.demandMbps, radioRate[id])
+            want[id] = Math.min(ti.demandMbps * arrivalFactor(), radioRate[id])
           }
           // GBR(음성/실시간) 먼저 admission, 잔여 용량을 비GBR이 비례 배분
           const gbrIds = grantIds.filter((id) => tiOf(id).gbr)
@@ -250,9 +311,79 @@ export function useCapacitySim() {
           const served: Record<string, number> = {}
           let used = 0
           let rejected = 0
+          // GFBR/MFBR (TS 23.501 §5.7.2.8): admission은 GFBR(보장 레이트, gfbr_mbps ?? demandMbps)로 판정하고
+          // 서빙 레이트는 MFBR(mfbr_mbps ?? demand*1.5)로 상한. GBR-first는 그대로, 판정 키만 표준 GFBR/MFBR.
+          const gbrCosts: Record<string, { gfbr: number; mfbr: number }> = {}
           for (const id of gbrIds) {
-            if (used + want[id] <= cellPeak) { served[id] = want[id]; used += want[id] }
-            else { served[id] = 0; rejected++ }
+            const ti = tiOf(id)
+            gbrCosts[id] = {
+              gfbr: Math.min(ti.gfbr_mbps ?? ti.demandMbps, radioRate[id]), // 무선 상한 반영 보장 레이트
+              mfbr: ti.mfbr_mbps ?? ti.demandMbps * 1.5,
+            }
+          }
+          const admitGbr = (id: string) => {
+            const s = Math.min(want[id], gbrCosts[id].mfbr) // 수요를 MFBR로 상한
+            served[id] = s; used += s
+          }
+          for (const id of gbrIds) {
+            if (used + gbrCosts[id].gfbr <= cellPeak) { admitGbr(id) }
+            else {
+              // ARP 프리엠션 (TS 23.501 §5.7.2.2) — 기본 OFF. 셀 용량 부족으로 admission 실패 시,
+              // 이미 admit된 GBR 플로우 중 incoming보다 arp_priority가 더 나쁜(숫자 큰=우선순위 낮은)
+              // 플로우를 찾아 선점(personMbps=0 + dropActiveCall)하고 incoming을 admit.
+              let preempted = false
+              if (st.qos.arp_preemption_enabled) {
+                const inArp = tiOf(id).arp_priority ?? 15
+                let victim: string | null = null
+                let worstArp = inArp
+                for (const aid of gbrIds) {
+                  if ((served[aid] ?? 0) <= 0) continue // 이미 admit된(서빙 중) 플로우만
+                  const vArp = tiOf(aid).arp_priority ?? 15
+                  if (vArp > worstArp) { worstArp = vArp; victim = aid } // 가장 우선순위 낮은 victim
+                }
+                if (victim) {
+                  used -= served[victim]
+                  served[victim] = 0
+                  personMbps[victim] = 0
+                  clearTraffic.push(...dropActiveCall(victim))
+                  arpNowPreempted.add(victim)
+                  if (!arpPreemptedUes.current.has(victim)) {
+                    arpPreemptedUes.current.add(victim)
+                    const vim = st.personImsi[victim] ?? defaultImsi(st.ueSim)
+                    const vnm = st.objects.find((o) => o.id === victim)?.name ?? victim
+                    st.addEvent('RU', 'warn',
+                      pick(st.lang,
+                        `${vnm}: 선점됨 — ARP 우선순위 (pre-emption) — ARP ${worstArp} > ${inArp}, 상위 GBR 플로우에 자원 양보`,
+                        `${vnm}: pre-empted — ARP priority (pre-emption) — ARP ${worstArp} > ${inArp}, yielded resources to higher-ARP GBR flow`,
+                        `${vnm}: 被抢占 — ARP 优先级 (pre-emption) — ARP ${worstArp} > ${inArp}, 让出资源给高优先级 GBR 流`),
+                      vnm, undefined, vim)
+                  }
+                  if (used + gbrCosts[id].gfbr <= cellPeak) { admitGbr(id); preempted = true }
+                }
+              }
+              if (!preempted) { served[id] = 0; rejected++ }
+            }
+          }
+          // GBR Notification Control (TS 23.501 §5.7.2.4) — 기본 OFF. admit되어 서빙 중인 GBR 플로우의
+          // 서빙 레이트가 GFBR 미만이면 침묵 대신 RAN Notification(Npcf) info 로그를 방출(전이 시).
+          if (st.qos.gbr_notify_control) {
+            for (const id of gbrIds) {
+              const gfbr = tiOf(id).gfbr_mbps ?? tiOf(id).demandMbps
+              const s = served[id] ?? 0
+              if (s > 0 && s < gfbr - 1e-9) {
+                if (!warned.current[`gnc-${id}`]) {
+                  warned.current[`gnc-${id}`] = true
+                  const im = st.personImsi[id] ?? defaultImsi(st.ueSim)
+                  const nm = st.objects.find((o) => o.id === id)?.name ?? id
+                  st.addEvent('NF', 'info',
+                    pick(st.lang,
+                      `${nm}: GFBR 보장 불가 — RAN Notification(Npcf) — 서빙 ${s.toFixed(2)} < GFBR ${gfbr.toFixed(2)}Mbps`,
+                      `${nm}: GFBR cannot be guaranteed — RAN Notification(Npcf) — served ${s.toFixed(2)} < GFBR ${gfbr.toFixed(2)}Mbps`,
+                      `${nm}: 无法保障 GFBR — RAN Notification(Npcf) — 服务 ${s.toFixed(2)} < GFBR ${gfbr.toFixed(2)}Mbps`),
+                    nm, undefined, im)
+                }
+              } else warned.current[`gnc-${id}`] = false
+            }
           }
           if (rejected > 0 && !warned.current[`adm-${r.id}`]) {
             warned.current[`adm-${r.id}`] = true
@@ -368,28 +499,19 @@ export function useCapacitySim() {
           } else if (prbUtil <= 0.8) warned.current[`prb-${r.id}`] = false
         }
       }
+      // #59(미지원 5QI) / ARP 프리엠션 거부 집합: 이번 틱에 거부되지 않은 UE는 해제(전이 재로깅 허용).
+      // 제거된 UE도 자연히 정리됨(q5qi/arpNowPreempted에 없으므로).
+      for (const id of [...qos5qiRejectedUes.current]) {
+        if (!q5qiNowRejected.has(id)) qos5qiRejectedUes.current.delete(id)
+      }
+      for (const id of [...arpPreemptedUes.current]) {
+        if (!arpNowPreempted.has(id)) arpPreemptedUes.current.delete(id)
+      }
       // ---- 배치 UE 무선구간 강제(추가 플로어): RAN 경로(RU→DU→CU→AMF/UPF) 사슬 + RSRP 커버리지 ----
       // SINR≥-10 플로어·슬라이스·등록·admission 로직은 그대로 두고, 그 위에 얹는 추가 게이트.
       // 좋은 곳→기준 미달 지역으로 이동하면 활성 통화/트래픽이 끊기도록 한다(걷는 UE는 FirstPerson에서 처리).
       const dropThr = st.mobility.call_drop_rsrp_dbm
-      // Fix 3: 이번 틱에서 활성 통화는 최대 1회만 endCall (양쪽 party가 동시에 나빠질 때
-      //   두 번째 endCall이 Call Waiting으로 막 재개된 heldCall을 잘못 끊는 것을 방지).
-      let callDropped = false
-      // Fix 2: 통화 party로서 드롭된 UE는 personTraffic도 내려 "통화 없는데 트래픽 ON" stuck 방지.
-      //   순수 데이터 드롭은 personTraffic=true 유지(신호/코어 복귀 시 자동 재개).
-      const clearTraffic: string[] = []
-      // 활성 통화를 안전하게 드롭: 재판독해 여전히 이 UE의 통화일 때만, 틱당 1회. 드롭된 통화의 양쪽 party id 반환.
-      const dropActiveCall = (uid: string): string[] => {
-        if (callDropped) return []
-        const live = useStore.getState().call
-        if (live && (live.fromId === uid || live.toId === uid)) {
-          const parties = [live.fromId, live.toId]
-          st.endCall()
-          callDropped = true
-          return parties
-        }
-        return []
-      }
+      // (callDropped/clearTraffic/dropActiveCall 은 RU 루프 앞에서 선언 — ARP 프리엠션과 공유)
       for (const ue of st.objects) {
         if (ue.kind !== 'person') continue
         const id = ue.id
@@ -500,6 +622,7 @@ export function useCapacitySim() {
         const smf = activeNf(st.coreNfs, zone, 'SMF', st.siteDown)
         const cap = smf?.max_pdu_sessions
         if (cap == null) continue
+        const t3396 = smf?.t3396_min ?? 12 // SMF/DNN back-off 타이머 (TS 24.501 §6.2.8)
         const sessUes = st.objects.filter((o) => {
           if (o.kind !== 'person' || objZone(o) !== zone) return false
           if (!st.personTraffic[o.id] || !st.personUeOn[o.id]) return false
@@ -515,9 +638,9 @@ export function useCapacitySim() {
             const im = st.personImsi[ue.id] ?? defaultImsi(st.ueSim)
             st.addEvent('NF', 'error',
               pick(st.lang,
-                `${ue.name}: PDU 세션 거부 — SMF 세션 한도 초과 (5GSM #26 Insufficient resources)`,
-                `${ue.name}: PDU session rejected — SMF session limit exceeded (5GSM #26 Insufficient resources)`,
-                `${ue.name}: PDU 会话拒绝 — SMF 会话数超限 (5GSM #26 Insufficient resources)`),
+                `${ue.name}: PDU 세션 거부 — SMF 세션 한도 초과 (5GSM #26 Insufficient resources) + T3396=${t3396}분 백오프`,
+                `${ue.name}: PDU session rejected — SMF session limit exceeded (5GSM #26 Insufficient resources) + T3396=${t3396} min back-off`,
+                `${ue.name}: PDU 会话拒绝 — SMF 会话数超限 (5GSM #26 Insufficient resources) + T3396=${t3396} 分钟回退`),
               ue.name, undefined, im)
           }
         }
@@ -525,6 +648,77 @@ export function useCapacitySim() {
       // 한도 내로 복귀한 UE는 거부 집합에서 해제(전이 재로깅 허용) + 제거된 UE 정리
       for (const id of [...pduRejectedUes.current]) {
         if (!pduNowRejected.has(id)) pduRejectedUes.current.delete(id)
+      }
+      // ---- 슬라이스별 NSAC(Network Slice Admission Control) → PDU 세션 거부 #69 (TS 23.501 §5.15.11) ----
+      // 존×슬라이스별로 그 슬라이스에 admit된 UE(트래픽 ON + 등록 + 트래픽 SST가 슬라이스 SST 일치, #91/#26 게이트와 동일)
+      // 수를 슬라이스의 nsac_max_ues와 비교. 한도 초과분 UE는 S-NSSAI 최대 UE 초과로 PDU 세션 거부(#69) → personMbps=0.
+      // droppedUes식 set으로 전이 시에만 로깅 + 한도 복귀 시 해제. 표준 슬라이스-어드미션 거부 #69.
+      const nsacNowRejected = new Set<string>()
+      for (const zone of ZONES) {
+        for (const slice of st.slices) {
+          if (slice.zone !== zone) continue
+          const nsac = slice.nsac_max_ues
+          if (nsac == null) continue
+          const sliceUes = st.objects.filter((o) => {
+            if (o.kind !== 'person' || objZone(o) !== zone) return false
+            if (!st.personTraffic[o.id] || !st.personUeOn[o.id]) return false
+            const im = st.personImsi[o.id]
+            if (im && !imsiRegistered(im, st.ueSim, st.registeredImsis)) return false // 미등록 제외
+            return tiOf(o.id).sst === slice.sst // 트래픽 SST → 이 슬라이스(#91/#26 게이트와 일치)
+          })
+          for (const ue of sliceUes.slice(Math.max(nsac, 0))) {
+            nsacNowRejected.add(ue.id)
+            personMbps[ue.id] = 0
+            if (!nsacRejectedUes.current.has(ue.id)) {
+              nsacRejectedUes.current.add(ue.id)
+              const im = st.personImsi[ue.id] ?? defaultImsi(st.ueSim)
+              st.addEvent('NF', 'error',
+                pick(st.lang,
+                  `${ue.name}: PDU 세션 거부 — 슬라이스 NSAC 한도 초과 (5GSM #69, S-NSSAI 최대 UE 초과) + T3585 백오프`,
+                  `${ue.name}: PDU session rejected — slice NSAC limit exceeded (5GSM #69, S-NSSAI max UEs) + T3585 back-off`,
+                  `${ue.name}: PDU 会话拒绝 — 切片 NSAC 超限 (5GSM #69, S-NSSAI 最大 UE 超出) + T3585 回退`),
+                ue.name, undefined, im)
+            }
+          }
+        }
+      }
+      // 한도 내로 복귀한 UE는 거부 집합에서 해제(전이 재로깅 허용) + 제거된 UE 정리
+      for (const id of [...nsacRejectedUes.current]) {
+        if (!nsacNowRejected.has(id)) nsacRejectedUes.current.delete(id)
+      }
+      // ---- 슬라이스-AMBR (TS 23.501 §5.7.2.6) — 슬라이스별 non-GBR 집계 상한 폴리싱(스로틀) ----
+      // UE-AMBR/Session-AMBR 클램프(per-RU 루프) 이후, 그리고 위 #91/#26/#69 거부(personMbps=0) 이후에 적용해
+      // 가장 빡빡한 상한이 이기고 실제 살아있는 플로우만 집계되도록 한다. 존×슬라이스별로 그 슬라이스의
+      // non-GBR 서빙 레이트 합이 slice_ambr_mbps를 넘으면 각 UE를 비례 축소(throttle, 거부 아님). GBR은 대상 아님.
+      // 스로틀된 값을 personTrafficByZone(UPF 부하)에도 반영해 일관 유지.
+      for (const zone of ZONES) {
+        for (const slice of st.slices) {
+          if (slice.zone !== zone) continue
+          const sAmbr = slice.slice_ambr_mbps
+          if (sAmbr == null) continue
+          const members = st.objects.filter((o) =>
+            o.kind === 'person' && objZone(o) === zone &&
+            !tiOf(o.id).gbr && tiOf(o.id).sst === slice.sst && (personMbps[o.id] ?? 0) > 0)
+          const agg = members.reduce((s, o) => s + (personMbps[o.id] ?? 0), 0)
+          if (agg > sAmbr && agg > 0) {
+            const factor = sAmbr / agg
+            for (const o of members) {
+              const before = personMbps[o.id]
+              const after = before * factor
+              personMbps[o.id] = after
+              personTrafficByZone[zone] = Math.max(personTrafficByZone[zone] - (before - after), 0)
+            }
+            if (!warned.current[`sambr-${slice.id}`]) {
+              warned.current[`sambr-${slice.id}`] = true
+              st.addEvent('NF', 'info',
+                pick(st.lang,
+                  `[PLMN-${zone}] 슬라이스 ${slice.name}(SST=${slice.sst}) Slice-AMBR 도달 — non-GBR 집계 ${agg.toFixed(1)}→${sAmbr.toFixed(1)}Mbps 폴리싱(${members.length}개 UE 비례 조절)`,
+                  `[PLMN-${zone}] Slice ${slice.name} (SST=${slice.sst}) Slice-AMBR reached — non-GBR aggregate policed ${agg.toFixed(1)}→${sAmbr.toFixed(1)}Mbps (${members.length} UE proportional throttle)`,
+                  `[PLMN-${zone}] 切片 ${slice.name}(SST=${slice.sst}) 达到 Slice-AMBR — 非GBR 聚合 ${agg.toFixed(1)}→${sAmbr.toFixed(1)}Mbps 限速(${members.length} 个 UE 按比例)`),
+                'PCF')
+            }
+          } else warned.current[`sambr-${slice.id}`] = false
+        }
       }
       st.setPersonMbps(personMbps)
 

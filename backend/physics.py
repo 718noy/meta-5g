@@ -102,12 +102,76 @@ def _b64(arr: np.ndarray) -> str:
     return base64.b64encode(np.ascontiguousarray(arr).tobytes()).decode("ascii")
 
 
+def _inv_norm_cdf(p):
+    """표준정규 역누적분포(분위수) — Acklam 유리함수 근사(벡터화).
+    해시→균등난수 u를 정규분포 z로 사상하는 데 사용(섀도우 페이딩). scipy 불필요."""
+    p = np.asarray(p, dtype=np.float64)
+    a = (-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+         1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00)
+    b = (-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+         6.680131188771972e+01, -1.328068155288572e+01)
+    c = (-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+         -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00)
+    d = (7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+         3.754408661907416e+00)
+    plow, phigh = 0.02425, 1.0 - 0.02425
+    lo = p < plow
+    hi = p > phigh
+    ql = np.sqrt(-2.0 * np.log(np.clip(p, 1e-300, None)))
+    x_lo = ((((((c[0] * ql + c[1]) * ql + c[2]) * ql + c[3]) * ql + c[4]) * ql + c[5])
+            / ((((d[0] * ql + d[1]) * ql + d[2]) * ql + d[3]) * ql + 1.0))
+    qh = np.sqrt(-2.0 * np.log(np.clip(1.0 - p, 1e-300, None)))
+    x_hi = -((((((c[0] * qh + c[1]) * qh + c[2]) * qh + c[3]) * qh + c[4]) * qh + c[5])
+             / ((((d[0] * qh + d[1]) * qh + d[2]) * qh + d[3]) * qh + 1.0))
+    qm = p - 0.5
+    rm = qm * qm
+    x_mid = (((((a[0] * rm + a[1]) * rm + a[2]) * rm + a[3]) * rm + a[4]) * rm + a[5]) * qm \
+        / (((((b[0] * rm + b[1]) * rm + b[2]) * rm + b[3]) * rm + b[4]) * rm + 1.0)
+    return np.where(lo, x_lo, np.where(hi, x_hi, x_mid))
+
+
+def _shadow_offset_db(points: np.ndarray, cell_id: int, sigma: float):
+    """섀도우 페이딩 오프셋(dB) — 3GPP TR 38.901 §7.4.1 로그정규 쉐도잉.
+
+    (복셀인덱스, 셀ID) 해시 → 균등[0,1) → 역정규CDF → ×σ. 결정론적이라 재계산해도
+    맵이 동일(깜빡임 없음). σ=0이면 오프셋 없음(하위호환). σ↑ → 셀 경계 RSRP 분산↑(패치형 커버리지).
+    좌표를 0.5m 격자 정수 인덱스로 양자화해 위치별 안정적인 값을 얻는다."""
+    if sigma <= 0.0:
+        return 0.0
+    ix = np.floor(points[:, 0] * 2.0).astype(np.int64).astype(np.uint64)
+    iy = np.floor(points[:, 1] * 2.0).astype(np.int64).astype(np.uint64)
+    iz = np.floor(points[:, 2] * 2.0).astype(np.int64).astype(np.uint64)
+    c = np.uint64(int(cell_id) & 0xFFFFFFFFFFFFFFFF)
+    h = ix * np.uint64(0x9E3779B97F4A7C15)
+    h = h ^ (iy * np.uint64(0xC2B2AE3D27D4EB4F))
+    h = h ^ (iz * np.uint64(0x165667B19E3779F9))
+    h = h ^ (c * np.uint64(0x27D4EB2F165667C5))
+    h = h ^ (h >> np.uint64(30))
+    h = h * np.uint64(0xBF58476D1CE4E5B9)
+    h = h ^ (h >> np.uint64(27))
+    h = h * np.uint64(0x94D049BB133111EB)
+    h = h ^ (h >> np.uint64(31))
+    u = (h >> np.uint64(11)).astype(np.float64) * (1.0 / 9007199254740992.0)
+    u = np.clip(u, 1e-9, 1.0 - 1e-9)
+    return _inv_norm_cdf(u) * float(sigma)
+
+
+def _bler_se_factor(target_bler: float) -> float:
+    """목표 BLER → 유효 스펙트럼효율(SE) 백오프 계수 — 3GPP TS 38.214 §5.1.3.
+    CQI/MCS는 목표 BLER 기준으로 선택된다. f(0.1)=1.0, f(0.01)≈0.85 —
+    낮은 목표(보수적 MCS)일수록 최대 SE가 낮아진다(단조 감소)."""
+    tb = float(np.clip(target_bler, 1e-3, 0.1))
+    return float(1.0 + 0.15 * (np.log10(tb) - np.log10(0.1)))
+
+
 def _received_power_dbm(
     gnb: dict,
     points: np.ndarray,
     obstacles: list,
     path_loss_exp: float = 3.5,
     ceil_h: float | None = None,
+    shadow_sigma_db: float = 0.0,
+    cell_id: int = 0,
 ) -> np.ndarray:
     """points(N,3)에서 gnb 하나의 수신전력(dBm).
 
@@ -129,6 +193,11 @@ def _received_power_dbm(
     dx, py, dz = delta[:, 0], points[:, 1], delta[:, 2]
     pl_1m = 20.0 * np.log10(freq) - 27.55
     gain = _antenna_gain_db(gnb, delta[:, 0], delta[:, 1], delta[:, 2])
+    # 안테나 배열 이득 (coherent combining) — TR 38.901 §7.3.
+    #   G_array = 10·log10(N_elem),  N_elem = ant_rows × ant_cols.
+    # 1×1 → 0dB(정확한 하위호환). 배열이 클수록 이득↑ → 커버리지/SINR↑ (단조 증가).
+    n_ant = float(gnb.get("ant_rows", 1) or 1) * float(gnb.get("ant_cols", 1) or 1)
+    gain = gain + 10.0 * np.log10(max(1.0, n_ant))
 
     # 장애물 투과 손실 (직접파 경로)
     loss = np.zeros(len(points))
@@ -152,7 +221,11 @@ def _received_power_dbm(
         d_ceil = np.sqrt(dx * dx + (py - img_y) ** 2 + dz * dz)
         total = total + path_mw(d_ceil, loss + REFLECT_LOSS_DB)
 
-    return 10.0 * np.log10(np.maximum(total, 1e-30))
+    rsrp = 10.0 * np.log10(np.maximum(total, 1e-30))
+    # 섀도우 페이딩(로그정규) — 결정론적 오프셋을 수신전력에 가산. TR 38.901 §7.4.1
+    if shadow_sigma_db > 0.0:
+        rsrp = rsrp + _shadow_offset_db(points, cell_id, shadow_sigma_db)
+    return rsrp
 
 
 def simulate(scene: dict) -> dict:
@@ -167,7 +240,9 @@ def simulate(scene: dict) -> dict:
     gnbs = [g for g in scene.get("gnbs", []) if g.get("enabled", True)]
     obstacles = scene.get("obstacles", [])
     ple = float(scene.get("path_loss_exp", 3.5))
-    nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 수신기 잡음지수 (TS 38.101-4)
+    scene_nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 씬 기본 잡음지수 (TS 38.101-4)
+    sigma = float(scene.get("shadow_sigma_db", 0.0))  # 섀도우 페이딩 σ (TR 38.901 §7.4.1)
+    scene_im_db = float(scene.get("interference_margin_db", 0.0))  # 씬 기본 간섭 마진 (TS 38.104 IoT)
     ceil_h = h if scene.get("ceiling", True) else None
 
     nx = max(int(round(w / res)), 2)
@@ -194,8 +269,20 @@ def simulate(scene: dict) -> dict:
             "rsrp_min": -200.0, "rsrp_max": -200.0,
         }
 
+    # 셀별 전파 파라미터 오버라이드 — 각 gNB 값이 있으면 셀 고유값, 없으면 씬 기본값.
+    # 로그거리 경로손실 지수(TR 38.901)/섀도우 페이딩 σ(TR 38.901 §7.4.1)를 셀마다 적용
+    # (일부 셀만 더 열악한 국소 환경을 모델링 가능). 미설정(None) → 씬 기본 → 기존 출력 그대로.
+    ple_arr = [
+        float(g["path_loss_exp"]) if g.get("path_loss_exp") is not None else ple
+        for g in gnbs
+    ]
+    sigma_arr = [
+        float(g["shadow_sigma_db"]) if g.get("shadow_sigma_db") is not None else sigma
+        for g in gnbs
+    ]
     powers_dbm = np.stack(
-        [_received_power_dbm(g, points, obstacles, ple, ceil_h) for g in gnbs]
+        [_received_power_dbm(g, points, obstacles, ple_arr[i], ceil_h, sigma_arr[i], i)
+         for i, g in enumerate(gnbs)]
     )  # (G, N)
     powers_mw = np.power(10.0, powers_dbm / 10.0)
 
@@ -213,9 +300,20 @@ def simulate(scene: dict) -> dict:
     weight = np.where(is_serving, 0.0, np.where(same_mod3, 2.0, 1.0))  # (G,N)
     interference_mw = np.sum(powers_mw * weight, axis=0)
     bw_hz = np.array([float(g.get("bandwidth_mhz", 100.0)) * 1e6 for g in gnbs])
-    noise_dbm = -174.0 + 10.0 * np.log10(bw_hz[serving]) + nf
+    # 셀별 잡음지수/간섭 마진 오버라이드 — 각 gNB 값이 있으면 셀 고유값, 없으면 씬 기본값.
+    # 서빙 셀 기준으로 잡음/마진을 적용(desense된 개별 RU 모델링 가능).
+    nf_arr = np.array([
+        float(g["noise_figure_db"]) if g.get("noise_figure_db") is not None else scene_nf
+        for g in gnbs
+    ])
+    im_arr = np.array([
+        float(g["interference_margin_db"]) if g.get("interference_margin_db") is not None else scene_im_db
+        for g in gnbs
+    ])
+    noise_dbm = -174.0 + 10.0 * np.log10(bw_hz[serving]) + nf_arr[serving]
     noise_mw = np.power(10.0, noise_dbm / 10.0)
-    sinr_db = 10.0 * np.log10(best_mw / (interference_mw + noise_mw))
+    # 간섭 마진(IoT): 부하 네트워크 근사 — SINR을 마진(dB)만큼 균일 저하. TS 38.104
+    sinr_db = 10.0 * np.log10(best_mw / (interference_mw + noise_mw)) - im_arr[serving]
 
     return {
         "nx": nx, "ny": ny, "nz": nz,
@@ -271,6 +369,12 @@ FIVEQI_GBR = {1, 2, 3, 4, 82, 83, 84, 85}
 FIVEQI_DELAY_CRITICAL = {82, 83, 84, 85}
 # Maximum Data Burst Volume(bytes) — TS 23.501 Table 5.7.4-1 (PDB 내 전달해야 할 최대 버스트).
 FIVEQI_MDBV = {82: 5600, 83: 1354, 84: 1354, 85: 255}
+# Priority Level — TS 23.501 Table 5.7.4-1. 낮을수록 높은 우선도(스케줄러가 혼잡 시 존중, §5.7.3.3).
+#   미표기/비표준 5QI 는 기본 90(최저 우선, eMBB 5QI9 동급) — 하위호환 안전값.
+FIVEQI_PRIORITY = {1: 20, 2: 40, 3: 30, 4: 50, 5: 10, 6: 60, 7: 70, 8: 80, 9: 90,
+                   65: 7, 66: 20, 82: 19, 83: 22, 84: 24, 85: 21, 90: 90}
+# Averaging Window(ms) — TS 23.501 Table 5.7.4-1. GBR 계열은 표준 2000ms, 비GBR 은 미적용(None).
+FIVEQI_AVG_WINDOW = {q: 2000 for q in FIVEQI_GBR}
 # NB-IoT/LTE-M 커버리지 확장(CE) 프로파일 마커(프로젝트 관례 5QI).
 IOT_CE_5QI = {90}
 # 코어/전송 지연(UPF+N3/N6 근사) — delay-critical 예산에서 무선 큐잉 여유 계산에 차감.
@@ -304,7 +408,7 @@ def _usable_prbs(bw_mhz: float, scs_khz: int) -> int:
 
 
 def _qos_metrics(fiveqi: int, cell_load: float, sinr_db: float, pdcp_dup: bool = False,
-                 scs_khz: int = 30, drx: bool = False) -> dict:
+                 scs_khz: int = 30, drx: bool = False, target_bler: float = 0.1) -> dict:
     """QoS 스케줄러 관점 지표: 지연/지터/패킷손실.
     혼잡(cell_load>1)이면 큐잉 지연 증가. GBR(고우선)은 완만, 비GBR은 급증.
     나쁜 무선품질(낮은 SINR)은 HARQ 재전송으로 지연·손실 증가.
@@ -329,11 +433,18 @@ def _qos_metrics(fiveqi: int, cell_load: float, sinr_db: float, pdcp_dup: bool =
     # DRX: 페이징/웨이크업 지연 페널티 (배터리↔지연 트레이드오프, 처리량 불변). TS 38.321 §5.7
     if drx:
         base += DRX_PAGING_LATENCY_MS
-    # 혼잡 시 큐잉 지연 (비GBR이 훨씬 민감)
-    queue = over * (25.0 if gbr else 120.0)
-    radio_penalty = max(0.0, (5.0 - sinr_db)) * 1.5  # 저SINR HARQ 재전송
+    # 혼잡 시 큐잉 지연 (비GBR이 훨씬 민감). TS 23.501 §5.7.3.3: 스케줄러가 Priority Level 존중 →
+    # 우선도 높은(낮은 값) 플로우는 큐잉 지연이 작고, 낮은 플로우는 크다. 기준 priority=90(5QI9)
+    # → prio_factor=1.0 이라 기본 eMBB 는 기존과 동일(하위호환). 단조·유계(0.05~1.5).
+    priority = FIVEQI_PRIORITY.get(fiveqi, 90)
+    prio_factor = min(max(priority / 90.0, 0.05), 1.5)
+    queue = over * (25.0 if gbr else 120.0) * prio_factor
+    # 목표 BLER(TS 38.214 §5.1.3): 낮은 목표→보수적 MCS→잔여 BLER↓·재전송↓ (단조).
+    # 기준 0.1 → scale=1.0(하위호환), 0.01 → 0.1. HARQ 재전송 지연/잔여 BLER를 함께 축소.
+    retx_scale = min(max(float(target_bler) / 0.1, 0.1), 1.0)
+    radio_penalty = max(0.0, (5.0 - sinr_db)) * 1.5 * retx_scale  # 저SINR HARQ 재전송
     latency = round(min(base + queue + radio_penalty, pdb * 3), 1)
-    radio_loss = 10 ** (-max(sinr_db + 3, 0.5) / 8.0)  # 저SINR BLER 근사
+    radio_loss = 10 ** (-max(sinr_db + 3, 0.5) / 8.0) * retx_scale  # 저SINR 잔여 BLER 근사
     mdbv = FIVEQI_MDBV.get(fiveqi)
     dropped_over_pdb = False
     mdbv_exceeded = False
@@ -455,7 +566,11 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     gnbs = [g for g in scene.get("gnbs", []) if g.get("enabled", True)]
     obstacles = scene.get("obstacles", [])
     ple = float(scene.get("path_loss_exp", 3.5))
-    nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 수신기 잡음지수 (TS 38.101-4)
+    scene_nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 씬 기본 잡음지수 (TS 38.101-4)
+    sigma = float(scene.get("shadow_sigma_db", 0.0))  # 섀도우 페이딩 σ (TR 38.901 §7.4.1)
+    scene_im_db = float(scene.get("interference_margin_db", 0.0))  # 씬 기본 간섭 마진 (TS 38.104 IoT)
+    scene_target_bler = float(scene.get("target_bler", 0.1))  # 씬 기본 목표 BLER (TS 38.214 §5.1.3)
+    scene_ue_pmax = float(scene.get("ue_pmax_dbm", 23.0))  # 씬 기본 UE 최대 송신전력 (TS 38.101-1 Pcmax)
     ceil_h = float(scene.get("space", {}).get("height", 10.0)) if scene.get("ceiling", True) else None
     point = np.array([position], dtype=np.float64)
 
@@ -466,7 +581,7 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     powers_mw = []
     raw_dbm = []  # AGC 클램프 이전 실제 수신전력 (UL 경로손실 역산용)
     agc_active = False
-    for g in gnbs:
+    for ci, g in enumerate(gnbs):
         # 빔포밍 + UE 추적: 빔을 UE 방향으로 조향한 상태로 계산
         if g.get("antenna") == "beam" and g.get("beam_tracking", True):
             ax = float(g["position"][0])
@@ -478,7 +593,11 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
                 azimuth_deg=float(np.rad2deg(np.arctan2(dz, dx))),
                 tilt_deg=float(-np.rad2deg(np.arctan2(dy, max(np.hypot(dx, dz), 1e-6)))),
             )
-        raw = float(_received_power_dbm(g, point, obstacles, ple, ceil_h)[0])
+        # 셀별 전파 파라미터 오버라이드 — 셀 고유값이 있으면 사용, 없으면 씬 기본값 폴백.
+        # 경로손실 지수(TR 38.901)·섀도우 σ(TR 38.901 §7.4.1)를 셀마다 적용(국소 열악환경 모델링).
+        g_ple = float(g["path_loss_exp"]) if g.get("path_loss_exp") is not None else ple
+        g_sigma = float(g["shadow_sigma_db"]) if g.get("shadow_sigma_db") is not None else sigma
+        raw = float(_received_power_dbm(g, point, obstacles, g_ple, ceil_h, g_sigma, ci)[0])
         # AGC: 과입력 시 UE가 수신 감쇠기로 -45dBm 이하로 제한
         if raw > AGC_MAX_RSRP_DBM:
             agc_active = True
@@ -498,6 +617,15 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     raw_mw = np.array([10.0 ** (r / 10.0) for r in raw_dbm])
     si = int(np.argmax(raw_mw))
     serving_gnb = gnbs[si]
+    # 서빙 셀별 RF 파라미터 오버라이드 — 셀 고유값이 있으면 사용, 없으면 씬 기본값 폴백.
+    _cell_nf = serving_gnb.get("noise_figure_db")
+    nf = float(_cell_nf) if _cell_nf is not None else scene_nf  # 수신기 잡음지수 (TS 38.101-4)
+    _cell_im = serving_gnb.get("interference_margin_db")
+    im_db = float(_cell_im) if _cell_im is not None else scene_im_db  # 간섭 마진 (TS 38.104 IoT)
+    _cell_tb = serving_gnb.get("target_bler")
+    target_bler = float(_cell_tb) if _cell_tb is not None else scene_target_bler  # 목표 BLER (TS 38.214 §5.1.3)
+    _cell_pmax = serving_gnb.get("ue_pmax_dbm")
+    ue_pmax = float(_cell_pmax) if _cell_pmax is not None else scene_ue_pmax  # UE 최대 송신전력 (TS 38.101-1 Pcmax)
     bw_mhz = float(serving_gnb.get("bandwidth_mhz", 100.0))
     bw_hz = bw_mhz * 1e6
     noise_mw = 10.0 ** ((-174.0 + 10.0 * np.log10(bw_hz) + nf) / 10.0)
@@ -509,7 +637,8 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
             continue
         w = 2.0 if int(g.get("pci", 0)) % 3 == s_mod3 else 1.0
         interference += raw_mw[j] * w
-    sinr = float(np.clip(10.0 * np.log10(raw_mw[si] / (interference + noise_mw)), -50, 60))
+    # 간섭 마진(IoT): 부하 네트워크 근사 — DL SINR을 마진(dB)만큼 균일 저하. TS 38.104
+    sinr = float(np.clip(10.0 * np.log10(raw_mw[si] / (interference + noise_mw)) - im_db, -50, 60))
     # PCI mod-30 충돌: 이웃과 UL DMRS 패턴 겹침 → UL BLER↑ (UL SINR 페널티)
     s_mod30 = int(serving_gnb.get("pci", 0)) % 30
     mod30_clash = any(
@@ -524,7 +653,11 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     #   256QAM: 레이어당 SE 상한 7.4, 미적용(64QAM) 5.55 bps/Hz
     #   4x4 MIMO: 레이어 2→4 / CA: 유효 대역폭 2배
     qam_cap = 7.4 if serving_gnb.get("qam256", True) else 5.55
-    layers = 4 if serving_gnb.get("mimo4x4", False) else 2
+    # DL 공간 레이어(rank) — TS 38.211/214. 명시 mimo_layers를 레이어 배수로 사용(≤8, rank 상한).
+    # 미지정 시 기존 mimo4x4 불리언 파생값(True→4, False→2)으로 폴백 → 하위호환.
+    # 기본 2 → 기존 2-레이어 동작 그대로. SINR/SE 계산은 불변, 레이어 배수만 변화(단조 증가).
+    default_layers = 4 if serving_gnb.get("mimo4x4", False) else 2
+    layers = int(np.clip(int(serving_gnb.get("mimo_layers", default_layers)), 1, 8))
     # 뉴머롤로지: 유효(가드밴드 제외) PRB → 유효 대역폭(≤ 공칭). 높은 SCS일수록 RB 폭↑·오버헤드 반영. TS 38.104
     scs = int(serving_gnb.get("scs_khz", 30))
     n_rb = _usable_prbs(bw_mhz, scs)
@@ -533,6 +666,8 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     # TDD DL 슬롯 비율 → DL 처리량은 DL 시간 점유율에 비례 (기본 0.75)
     dl_ratio = float(serving_gnb.get("tdd_dl_ratio", 0.75))
     se = min(np.log2(1.0 + 10.0 ** (sinr / 10.0)), qam_cap)
+    # 목표 BLER(TS 38.214 §5.1.3): CQI/MCS는 목표 BLER 기준 선택 — 낮은 목표→보수적 MCS→최대 SE↓.
+    se = se * _bler_se_factor(target_bler)
     throughput_mbps = round(se * bw_eff * 0.567 * layers * dl_ratio, 1)
 
     freq = float(serving_gnb.get("freq_mhz", 3500.0))
@@ -541,7 +676,7 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     # 하향 RSRP로 경로손실 역산. UE Pmax(TS 38.101-1)로 상한 클램프.
     tx_dl = float(serving_gnb.get("tx_power_dbm", 30.0)) + float(serving_gnb.get("gain_dbi", 0.0))
     est_pl = tx_dl - raw_dbm[si]  # 경로손실 역산 (AGC 클램프 이전 원신호 사용)
-    ue_pmax = float(scene.get("ue_pmax_dbm", 23.0))  # UE 최대 송신전력 (TS 38.101-1 Pcmax)
+    # ue_pmax 는 서빙 셀 오버라이드 우선(위에서 해석) → UL PUSCH/PRACH 전력 클램프에 사용.
     p0 = float(serving_gnb.get("p0_nominal_dbm", -90.0))
     alpha = float(serving_gnb.get("alpha", 0.8))
     ramp = float(serving_gnb.get("prach_ramp_step_db", 2.0))
@@ -604,7 +739,8 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     pdcp_dup = bool(serving_gnb.get("pdcp_duplication", False))
     # 뉴머롤로지(슬롯 지연)·DRX(페이징 웨이크 지연) 반영. TS 38.211 / TS 38.321 §5.7
     drx_on = bool(serving_gnb.get("drx", False))
-    qos = _qos_metrics(fiveqi, cell_load, sinr, pdcp_dup, scs_khz=scs, drx=drx_on)
+    qos = _qos_metrics(fiveqi, cell_load, sinr, pdcp_dup, scs_khz=scs, drx=drx_on,
+                       target_bler=target_bler)
 
     # NB-IoT/LTE-M 커버리지 확장: 반복이 지연을 부풀리고 유효 처리량을 나눈다(협대역 상한).
     if iot_ce and ce is not None:
@@ -619,7 +755,7 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
 
     # 서비스모드 확장: RSSI(전체 수신 전력), RI(공간 레이어), SSB 인덱스(빔 근사), NCI
     rssi = float(min(10.0 * np.log10(np.sum(powers_mw) + noise_mw), AGC_MAX_RSRP_DBM))
-    ri = 4 if serving_gnb.get("mimo4x4", False) else 2
+    ri = layers  # 보고용 RI = 실제 사용 공간 레이어 수 (mimo_layers 반영)
     if serving_gnb.get("antenna") == "beam":
         ssb_idx = int(float(serving_gnb.get("azimuth_deg", 0.0)) % 360 // 45)
     else:

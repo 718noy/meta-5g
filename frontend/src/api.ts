@@ -52,9 +52,22 @@ export function buildScene(
         ca_enabled: o.gnb!.ca_enabled,
         qam256: o.gnb!.qam256,
         mimo4x4: o.gnb!.mimo4x4,
+        // DL 공간 레이어(rank) 명시값 — TS 38.211/214, ≤8. 기본 2 = 기존 2-레이어 동작.
+        mimo_layers: o.gnb!.mimo_layers,
+        // 안테나 배열 차원 (행×열) — TR 38.901 §7.3 배열이득. 기본 1×1 = 0dB(하위호환).
+        ant_rows: o.gnb!.ant_rows,
+        ant_cols: o.gnb!.ant_cols,
         energy_saving: o.gnb!.energy_saving,
         // URLLC 신뢰성: PDCP 복제/중복 PDU 세션 (physics.probe QoS 손실 모델에서 사용)
         pdcp_duplication: o.gnb!.pdcp_duplication,
+        // 셀별 RF 수신 파라미터 오버라이드 (미설정 시 씬 기본값 폴백)
+        noise_figure_db: o.gnb!.noise_figure_db, // 수신기 잡음지수 (dB) — TS 38.101-4
+        target_bler: o.gnb!.target_bler, // 목표 BLER (MCS/CQI 선택) — TS 38.214 §5.1.3
+        interference_margin_db: o.gnb!.interference_margin_db, // 간섭 마진 (dB) — TS 38.104 IoT
+        // 셀별 전파/UL 파라미터 오버라이드 (미설정 시 씬 기본값 폴백)
+        path_loss_exp: o.gnb!.path_loss_exp, // 경로손실 지수 (log-distance) — TR 38.901
+        shadow_sigma_db: o.gnb!.shadow_sigma_db, // 섀도우 페이딩 σ (dB) — TR 38.901 §7.4.1
+        ue_pmax_dbm: o.gnb!.ue_pmax_dbm, // UE 최대 송신전력 (dBm) — TS 38.101-1 Pcmax
       }
     })
     .filter((g) => g !== null)
@@ -87,6 +100,9 @@ export function buildScene(
     path_loss_exp: rf.path_loss_exp, // 경로손실 지수 (log-distance) — TR 38.901
     noise_figure_db: rf.noise_figure_db, // 수신기 잡음지수 (dB) — TS 38.101-4
     ue_pmax_dbm: rf.ue_pmax_dbm, // UE 최대 송신전력 (dBm) — TS 38.101-1 Pcmax
+    shadow_sigma_db: rf.shadow_sigma_db, // 섀도우 페이딩 표준편차 (dB) — TR 38.901 §7.4.1
+    interference_margin_db: rf.interference_margin_db, // 간섭 마진 (dB) — TS 38.104 IoT
+    target_bler: rf.target_bler, // 목표 BLER (MCS/CQI 선택) — TS 38.214 §5.1.3
     gnbs,
     obstacles,
   }

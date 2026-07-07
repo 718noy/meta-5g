@@ -4,6 +4,7 @@
 // Registration Accept → PDU Session Establishment(NRF/SMF/PCF/CHF/UPF) → DRB 설정 → ATTACHED.
 // 로그 문구는 실제 스택(UERANSIM/Open5GS)·pcap과 동일하게 영문 3GPP 용어를 사용한다.
 import type { LogLevel, LogSource } from './store'
+import { pick, type Lang } from './i18n'
 
 // dir: 이 로그가 붙은 노드(NF/UE) 기준 메시지 방향. 'in'=수신(←), 'out'=송신(→).
 export interface AttachStep {
@@ -115,6 +116,32 @@ export interface AttachCtx {
   amfCongested?: boolean // AMF max_registered_ue 초과 → Registration Reject #22 Congestion
   t3346Min?: number // #22 Congestion back-off 타이머 T3346 (분)
   t3512Min?: number // AMF 주기적 등록 갱신 타이머 T3512 (분, Registration Accept)
+  // ── batch-2: Core/RRC 파라미터 → 표준 3GPP 원인/플로우 매핑 ──
+  maxAllowedNssai?: number // NSSF 동시 허용 S-NSSAI 최대 개수 (TS 23.501 §5.15.4). Allowed-NSSAI 클램프; 공집합→#62
+  authFailMode?: 'none' | 'mac' | 'sync' // 5G-AKA 인증 장애 주입 (TS 33.501/TS 24.501 §5.4.1.3): 'mac'→#20, 'sync'→#21(AUTS 재동기)
+  implicitDeregMin?: number // AMF implicit de-registration 타이머 (분, TS 23.501 §5.3.4) → Registration Accept 표기
+  nrfTtlSec?: number // NRF NF-profile heartbeat TTL (초, TS 29.510) → NF discovery 표기
+  t300Ms?: number // RRCSetupRequest→RRCSetup 가드 타이머 (TS 38.331)
+  raResponseWindowMs?: number // RAR(Msg2) 수신 윈도우 ra-ResponseWindow (TS 38.321)
+  ssbPeriodicityMs?: number // SSB 주기 (TS 38.213) → 셀탐색 취득지연
+  sib1PeriodicityMs?: number // SIB1 주기 (TS 38.331) → SIB1 취득지연
+  // ── batch-3: Core 파라미터 → 표준 원인/플로우 매핑 ──
+  roaming?: boolean // 홈 PLMN ≠ 서빙 PLMN (inter-PLMN) → SEPP N32 경유 홈 접속. false면 SEPP 무영향
+  sepp?: string | null // 서빙(방문) SEPP 이름 (N32 종단)
+  seppN32Secure?: boolean // SEPP N32 handshake/cert 유효 (TS 29.573 / TS 33.501 §13). roaming+false → #11 PLMN not allowed
+  n4HeartbeatSec?: number // SMF↔UPF PFCP N4 heartbeat 주기 (초, TS 29.244). 0 = 비활성
+  chfQuotaMb?: number // CHF 온라인 과금 부여 quota (MB, TS 32.290). 0 = 무제한
+  pcfDefault5qi?: number // PCF 기본 QoS-flow 5QI (TS 23.501 §5.7.4). default 9
+  t3502Min?: number // AMF T3502 재시도 타이머 (분, TS 24.501). default 12
+  // ── RQoS + QoS-flow 프로파일 표면화 (TS 23.501 §5.7.5 / §5.7.2~4) ──
+  lang?: Lang // 로그 언어 (기본 ko) — RQoS/QoS-flow 프로파일 라인 3개국어 렌더
+  reflectiveQos?: boolean // Reflective QoS(RQA/RQI) 활성 (TS 23.501 §5.7.5). true일 때만 RQA 라인 방출
+  qosFiveqi?: number // QoS-flow 5QI (UE 트래픽 종류에서 해석). 없으면 pcfDefault5qi
+  qosPriorityLevel?: number // 5QI Priority Level (낮을수록 우선, TS 23.501 §5.7.3.3)
+  qosArpPriority?: number // ARP priority level 1..15 (1=최고, TS 23.501 §5.7.2.2)
+  qosGbr?: boolean // GBR resource type 여부 — true면 GFBR/MFBR 표기
+  qosGfbrMbps?: number // Guaranteed Flow Bit Rate (GBR 전용, Mbps)
+  qosMfbrMbps?: number // Maximum Flow Bit Rate (GBR 전용, Mbps)
 }
 
 function sstLabel(ssts: number[] | undefined): string {
@@ -128,6 +155,14 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   const ru = ctx.servingName
   const dnn = ctx.dnn ?? 'internet'
   const reqSst = ctx.requestedSst ?? [1]
+  // batch-2 튜너블(표준 기본값). 취득지연은 주기가 클수록 느려짐.
+  const ssbP = ctx.ssbPeriodicityMs ?? 20 // SSB 주기 (TS 38.213)
+  const sib1P = ctx.sib1PeriodicityMs ?? 20 // SIB1 주기 (TS 38.331)
+  const acqMs = 2 * ssbP + sib1P // 셀탐색 취득지연 근사: SSB 스윕 2주기 + SIB1 1주기
+  const t300 = ctx.t300Ms ?? 1000 // RRCSetupRequest→Setup 가드 (TS 38.331)
+  const raWin = ctx.raResponseWindowMs ?? 10 // RAR 수신 윈도우 (TS 38.321)
+  const dflt5qi = ctx.pcfDefault5qi ?? 9 // PCF 기본 QoS-flow 5QI (TS 23.501 §5.7.4)
+  const lang = ctx.lang ?? 'ko' // RQoS/QoS-flow 프로파일 라인 3개국어 렌더
   // SECTION T: from/to를 메시지 텍스트가 아니라 호출부에서 명시적으로 넘긴다 (3GPP 방향).
   const push = (
     source: LogSource,
@@ -144,12 +179,12 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
     push('UE', ue, 'Cell search: no suitable/acceptable cell found — out of service (RRC_IDLE)', ue, ue, 'warn', 'in')
     return S
   }
-  push('UE', ue, `Cell search: PSS/SSS detected — PCI ${ctx.pci ?? '?'}`, ru, ue, 'info', 'in')
-  push('UE', ue, 'PBCH decoded → MIB (SFN, subCarrierSpacingCommon, pdcch-ConfigSIB1)', ru, ue, 'info', 'in')
-  push('RU', ru, 'Broadcast SIB1 (cellSelectionInfo, servingCellConfigCommon, ra-ConfigCommon)', ru, ue, 'info', 'out')
+  push('UE', ue, `Cell search: PSS/SSS detected — PCI ${ctx.pci ?? '?'} (SSB periodicity ${ssbP}ms — SS/PBCH burst sweep)`, ru, ue, 'info', 'in')
+  push('UE', ue, `PBCH decoded → MIB (SFN, subCarrierSpacingCommon, pdcch-ConfigSIB1); SSB @ ${ssbP}ms`, ru, ue, 'info', 'in')
+  push('RU', ru, `Broadcast SIB1 (cellSelectionInfo, servingCellConfigCommon, ra-ConfigCommon) — SIB1 periodicity ${sib1P}ms`, ru, ue, 'info', 'out')
   // SIB1 cellBarred (TS 38.331/38.304): barred이면 이 셀에 캠핑 불가 → intra-freq reselection, 서비스 불가.
   const barred = ctx.cellBarred === true
-  push('UE', ue, `SIB1 acquired → PLMN ${ctx.plmn}, TAC ${ctx.tac}, cellBarred=${barred ? 'barred' : 'notBarred'}`, ru, ue, barred ? 'warn' : 'info', 'in')
+  push('UE', ue, `SIB1 acquired → PLMN ${ctx.plmn}, TAC ${ctx.tac}, cellBarred=${barred ? 'barred' : 'notBarred'} (acquisition delay ~${acqMs}ms @ SSB ${ssbP}ms + SIB1 ${sib1P}ms)`, ru, ue, barred ? 'warn' : 'info', 'in')
   if (barred) {
     push('UE', ue, 'cell barred (SIB1) — intra-freq reselection, no service (RRC_IDLE)', ru, ue, 'warn', 'in')
     return S
@@ -166,10 +201,10 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   push('UE', ue, 'SIB2/SIB4 acquired (RACH-ConfigCommon, intra/inter-freq reselection)', ru, ue, 'info', 'in')
 
   // ── Random Access (Msg1~4) ── (Msg1/Msg3 UE→RU, Msg2/Msg4 RU→UE, Complete UE→RU)
-  push('UE', ue, 'PRACH Msg1: preamble transmitted (RA-RNTI)', ue, ru, 'info', 'out')
-  push('RU', ru, 'Msg2 RAR: Timing Advance + Temporary C-RNTI granted', ru, ue, 'info', 'out')
-  push('UE', ue, 'Msg3: RRCSetupRequest (ue-Identity=random, establishmentCause=mo-Signalling)', ue, ru, 'info', 'out')
-  push('RU', ru, 'Msg4: RRCSetup (SRB1, masterCellGroupConfig)', ru, ue, 'info', 'out')
+  push('UE', ue, `PRACH Msg1: preamble transmitted (RA-RNTI) — monitor RAR in ra-ResponseWindow ${raWin}ms`, ue, ru, 'info', 'out')
+  push('RU', ru, `Msg2 RAR: Timing Advance + Temporary C-RNTI granted (within ra-ResponseWindow ${raWin}ms)`, ru, ue, 'info', 'out')
+  push('UE', ue, `Msg3: RRCSetupRequest (ue-Identity=random, establishmentCause=mo-Signalling) — T300=${t300}ms started`, ue, ru, 'info', 'out')
+  push('RU', ru, `Msg4: RRCSetup (SRB1, masterCellGroupConfig) — T300 stopped (RRC setup within guard)`, ru, ue, 'info', 'out')
   push('UE', ue, 'RRCSetupComplete (selectedPLMN, dedicatedNAS-Message: Registration Request)', ue, ru, 'info', 'out')
 
   // ── NGAP / NAS Registration ──
@@ -187,7 +222,8 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   // 도달하면 신규 등록을 혼잡으로 거부하고 back-off T3346을 부여 → UE는 T3346 만료까지 재시도 금지.
   if (ctx.amfCongested) {
     const t3346 = ctx.t3346Min ?? 12
-    push('NF', amf, `Registration Reject (5GMM cause #22 congestion) — AMF at max_registered_ue; back-off timer T3346=${t3346} min → UE`, amf, ue, 'error', 'out')
+    const t3502 = ctx.t3502Min ?? 12
+    push('NF', amf, `Registration Reject (5GMM cause #22 congestion) — AMF at max_registered_ue; back-off timer T3346=${t3346} min, T3502=${t3502} min (reattempt) → UE`, amf, ue, 'error', 'out')
     return S
   }
   if (regType === 'initial') {
@@ -197,7 +233,8 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
     push('NF', amf, `Registration Request (${guti}, 5GS-registration-type=periodic-registration-updating)`, ue, amf, 'info', 'in')
     push('NF', amf, 'NAS integrity verified with existing native 5G security context (no re-authentication)', amf, amf, 'info', 'in')
     push('NF', amf, `Registration Accept (5G-GUTI retained, TAI-list, T3512=${t3512} min restarted) → UE`, amf, ue, 'info', 'out')
-    push('UE', ue, 'Registration Complete — periodic update done (RM-REGISTERED, CM-IDLE, no PDU re-establishment)', ue, amf, 'info', 'out')
+    // 5G-GUTI가 유지되면 Registration Complete를 보내지 않음 (TS 24.501 §5.5.1.2/§5.5.1.3 — 신규 GUTI 배정 시에만 전송).
+    push('UE', ue, 'Periodic registration update done — no Registration Complete (5G-GUTI retained); RM-REGISTERED, CM-IDLE, no PDU re-establishment', ue, ue, 'info', 'in')
     return S
   } else {
     // SECTION A: 이동성 등록 갱신 — TAI 변경. PDU-session-status/active-flag 로 UP 재활성.
@@ -213,16 +250,31 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
     return S
   }
 
+  // ── SEPP N32: 로밍(inter-PLMN) 시 방문 AMF가 홈 NF 도달 전 홈 SEPP와 N32 보안 채널 수립 ──
+  // TS 33.501 §13 / TS 29.573. sepp_n32_secure=false → N32-c handshake/cert 실패 → 홈 PLMN 도달 불가 →
+  // Registration Reject 5GMM #11 (PLMN not allowed) 후 중단. 비로밍(홈) attach는 경로에 SEPP 없음 → 무영향.
+  if (ctx.roaming) {
+    const sepp = ctx.sepp ?? 'SEPP'
+    if (ctx.seppN32Secure === false) {
+      // N32 인터커넥트/인증서 장애는 일시적(transient) — VPLMN을 영구 금지(#11 PLMN not allowed)하면 안 됨.
+      push('NF', sepp, 'N32-c handshake failed (SEPP cert / TLS / interconnect) — home PLMN unreachable via N32 (TS 29.573)', sepp, amf, 'error', 'out')
+      push('NF', amf, 'N32 interconnect failure → registration via VPLMN aborted (transient, retry) — no permanent PLMN-forbid', amf, ue, 'error', 'out')
+      return S
+    }
+    push('NF', sepp, 'N32-c handshake OK (mutual TLS / PRINS) — secure inter-PLMN interconnect to home PLMN established', sepp, amf, 'info', 'out')
+  }
+
   // ── NRF: AMF가 인증/데이터 NF 발견(NF discovery/selection) ── (요청 AMF→NRF, 응답 NRF→AMF)
   if (ctx.nrf) {
+    const ttl = ctx.nrfTtlSec ?? 30
     push('NF', ctx.nrf, 'Nnrf_NFDiscovery Request ← AMF (target-nf-type=AUSF, requester=AMF)', amf, ctx.nrf, 'info', 'in')
-    push('NF', ctx.nrf, 'Nnrf_NFDiscovery Response → AMF (AUSF/UDM NF-profile, priority, capacity)', ctx.nrf, amf, 'info', 'out')
+    push('NF', ctx.nrf, `Nnrf_NFDiscovery Response → AMF (AUSF/UDM NF-profile, priority, capacity; heartbeat TTL=${ttl}s, validityPeriod)`, ctx.nrf, amf, 'info', 'out')
   }
 
   // ── 5G-AKA 인증 (AUSF ↔ UDM ↔ UDR) ──
   if (!ctx.udm || !ctx.ausf) {
     push('NF', amf,
-      `Authentication aborted — ${!ctx.udm ? 'UDM' : 'AUSF'} unavailable → Registration Reject (5GMM cause #22 congestion)`,
+      `Authentication cannot proceed — home ${!ctx.udm ? 'UDM' : 'AUSF'} unreachable (network failure) → registration aborted`,
       amf, ue, 'error', 'out')
     return S
   }
@@ -233,25 +285,51 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   }
   if (!ctx.imsiRegistered) {
     push('NF', ctx.udm,
-      'subscriber not found (SUPI not provisioned in UDR) → Registration Reject (5GMM cause #3 Illegal UE)',
+      'Nudm_UEAuthentication_Get error 404 USER_NOT_FOUND (SUPI not provisioned in UDR) → AUSF → AMF',
       ctx.udm, ctx.ausf, 'error', 'out')
+    push('NF', amf,
+      'Registration Reject (5GMM cause #3 Illegal UE) → UE',
+      amf, ue, 'error', 'out')
     return S
   }
   push('NF', ctx.udm, 'UDM generated 5G HE AV (RAND, AUTN, XRES*, K_AUSF) → AUSF', ctx.udm, ctx.ausf, 'info', 'out')
   push('NF', ctx.ausf, 'AUSF stored HXRES*, derived K_SEAF; 5G SE AV (RAND, AUTN, HXRES*) → AMF/SEAF', ctx.ausf, amf, 'info', 'out')
   push('NF', amf, 'NAS Authentication Request (RAND, AUTN, ngKSI) → UE', amf, ue, 'info', 'out')
+  // auth_fail_mode (TS 33.501 / TS 24.501 §5.4.1.3): USIM AUTN 검증 실패 주입 지점.
+  //  'mac' → AUTN MAC 불일치 → Authentication Failure #20; 'sync' → SQN 범위 이탈 → #21(AUTS)로 UDM 재동기.
+  const authFail = ctx.authFailMode ?? 'none'
+  if (authFail === 'mac') {
+    push('UE', ue, 'USIM: AUTN MAC check failed → NAS Authentication Failure (5GMM cause #20 MAC failure)', ue, amf, 'error', 'out')
+    push('NF', amf, 'Authentication aborted (#20 MAC failure) — abandon RAND/AUTN, no new AV; Registration not completed', amf, ue, 'error', 'out')
+    return S
+  }
+  if (authFail === 'sync') {
+    push('UE', ue, 'USIM: SQN out of range → NAS Authentication Failure (5GMM cause #21 Synch failure, AUTS)', ue, amf, 'warn', 'out')
+    push('NF', ctx.ausf, 'Nausf_UEAuthentication (re-sync) ← AMF (RAND, AUTS) → UDM', amf, ctx.ausf, 'warn', 'out')
+    push('NF', ctx.udm, 'UDM: AUTS de-conceals SQN_MS → re-synchronizes SQN, generates fresh 5G HE AV', ctx.udm, ctx.ausf, 'warn', 'out')
+    push('NF', amf, 'Authentication aborted after re-synchronization (#21) — fresh AV required, registration not completed', amf, ue, 'error', 'out')
+    return S
+  }
   push('UE', ue, 'USIM verified AUTN → computed RES* → NAS Authentication Response', ue, amf, 'info', 'out')
   // BUG2: 검증 주체 분리 — SEAF(AMF)는 HRES*==HXRES*, AUSF(홈)는 RES*==XRES*
   push('NF', amf, 'SEAF: HRES* (SHA-256(RAND‖RES*)) == HXRES* → forward RES* to AUSF', amf, ctx.ausf, 'info', 'out')
   push('NF', ctx.ausf, 'AUSF: RES* == XRES* → home confirmation OK; K_SEAF/K_AMF derived', ctx.ausf, amf, 'info', 'out')
 
   // ── Security Mode ── (SMC AMF→UE, Complete UE→AMF, AS SMC RU→UE)
-  push('NF', amf, 'NAS Security Mode Command (5G-EA2/5G-IA2, ngKSI, UE-security-capabilities)', amf, ue, 'info', 'out')
+  push('NF', amf, 'NAS Security Mode Command (5G-EA2/5G-IA2, ngKSI, ABBA, UE-security-capabilities)', amf, ue, 'info', 'out')
   push('UE', ue, 'NAS Security Mode Complete (ciphered + integrity-protected, IMEISV)', ue, amf, 'info', 'out')
   push('RU', ru, 'AS SecurityModeCommand/Complete + RRCReconfiguration (SRB2, K_gNB)', ru, ue, 'info', 'out')
 
   // ── NSSF: 슬라이스 선택 (Requested NSSAI → Allowed NSSAI) ──
-  const allowed = ctx.allowedSst ?? reqSst
+  let allowed = ctx.allowedSst ?? reqSst
+  // max_allowed_nssai (TS 23.501 §5.15.4): NSSF/AMF가 동시 허용 S-NSSAI 개수를 상한으로 클램프.
+  //  상한 초과분은 Allowed NSSAI에서 절삭. 클램프 결과가 공집합이면 아래 #62 경로로 거부.
+  const maxNssai = ctx.maxAllowedNssai ?? 8
+  if (allowed.length > maxNssai) {
+    const dropped = allowed.slice(maxNssai)
+    allowed = allowed.slice(0, maxNssai)
+    push('NF', ctx.nssf ?? amf, `Allowed NSSAI clamped to max_allowed_nssai=${maxNssai} — dropped {${sstLabel(dropped)}} (TS 23.501 §5.15.4)`, ctx.nssf ?? amf, amf, 'warn', ctx.nssf ? 'in' : 'out')
+  }
   if (allowed.length === 0) {
     // Requested NSSAI 전부 미허용 → Allowed NSSAI 공집합
     if (ctx.nssf) {
@@ -266,16 +344,21 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   }
   push('NF', amf, `AMF assigned Allowed NSSAI {${sstLabel(allowed)}} to ${ue}`, amf, ue, 'info', 'out')
 
-  // ── PCF: AM Policy Association + UE Policy(URSP) ── (Create AMF→PCF, 응답 PCF→AMF)
+  // ── Subscription (UDM): UECM 등록 후 SDM 가입데이터 취득 (정책보다 선행) ──
+  push('NF', ctx.udm, 'Nudm_UECM_Registration ← AMF (serving AMF 등록)', amf, ctx.udm, 'info', 'in')
+  push('NF', ctx.udm, 'Nudm_SDM_Get ← AMF: subscription data (Access&Mobility, SMF-selection, UE-AMBR)', amf, ctx.udm, 'info', 'in')
+
+  // ── PCF: AM Policy Association + UE Policy(URSP) ── (Create AMF→PCF, 응답 PCF→AMF; 가입데이터 이후)
   if (ctx.pcf) {
     push('NF', ctx.pcf, 'Npcf_AMPolicyControl_Create ← AMF (SUPI, Allowed NSSAI, location)', amf, ctx.pcf, 'info', 'in')
     push('NF', ctx.pcf, 'PCF → AMF: AM policy (RFSP, service-area-restriction) + UE Policy (URSP rules)', ctx.pcf, amf, 'info', 'out')
   }
 
-  // ── Subscription / Context / Accept ──
-  push('NF', ctx.udm, 'Nudm_SDM_Get ← AMF: subscription data (Access&Mobility, SMF-selection, UE-AMBR)', amf, ctx.udm, 'info', 'in')
+  // ── Context / Accept ──
   push('RU', ru, 'NGAP InitialContextSetupRequest → gNB (Allowed-NSSAI, UE-AMBR, K_gNB)', amf, ru, 'info', 'in')
-  push('NF', amf, `Registration Accept (5G-GUTI, TAI-list, Allowed-NSSAI {${sstLabel(allowed)}}, T3512=${t3512} min${ctx.mico ? ', MICO-indication=raai (MICO mode)' : ''}) → UE`, amf, ue, 'info', 'out')
+  // implicit_dereg_min (TS 23.501 §5.3.4): AMF가 T3512 만료 후 UE 응답이 없으면 이 타이머로 암묵 등록해제.
+  const implicitDereg = ctx.implicitDeregMin != null ? `, implicit-dereg=${ctx.implicitDeregMin} min` : ''
+  push('NF', amf, `Registration Accept (5G-GUTI, TAI-list, Allowed-NSSAI {${sstLabel(allowed)}}, T3512=${t3512} min${implicitDereg}${ctx.mico ? ', MICO-indication=raai (MICO mode)' : ''}) → UE`, amf, ue, 'info', 'out')
   if (ctx.mico) {
     push('UE', ue, 'MICO mode negotiated (T3324 active) — UE unreachable for MT while in CM-IDLE (no paging)', amf, ue, 'warn', 'in')
   }
@@ -285,7 +368,7 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   const pduSst = ctx.sliceSst ?? allowed[0]
   push('UE', ue, `UL NAS: PDU Session Establishment Request (PSI=1, DNN=${dnn}, S-NSSAI SST=${pduSst}, IPv4)`, ue, amf, 'info', 'out')
   if (!ctx.smf) {
-    push('NF', amf, 'Nsmf_PDUSession_CreateSMContext failed — no SMF → PDU Session Reject (#26/#31)', amf, ue, 'error', 'out')
+    push('NF', amf, 'Nsmf_PDUSession_CreateSMContext failed — no SMF → PDU Session Establishment Reject (5GSM cause #26 insufficient resources)', amf, ue, 'error', 'out')
     return S
   }
   // NRF: AMF가 S-NSSAI/DNN에 맞는 SMF 발견
@@ -295,17 +378,20 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   }
   const smf = ctx.smf
   push('NF', smf, 'Nsmf_PDUSession_CreateSMContext ← AMF (SUPI, PSI=1, S-NSSAI, DNN)', amf, smf, 'info', 'in')
+  // SMF가 UDM에서 SM 가입데이터 취득 (TS 23.502 §4.3.2.2.1)
+  push('NF', ctx.udm, 'Nudm_SDM_Get ← SMF (SM subscription: DNN, S-NSSAI, Session-AMBR, default-5QI/ARP)', smf, ctx.udm, 'info', 'in')
   // SMF: SM Policy Association (PCF) + 과금(CHF) + 바인딩(BSF)
   if (ctx.pcf) {
     push('NF', ctx.pcf, 'Npcf_SMPolicyControl_Create ← SMF (DNN, S-NSSAI, PDU type)', smf, ctx.pcf, 'info', 'in')
-    push('NF', ctx.pcf, 'PCF → SMF: SM policy (Session-AMBR, PCC rules, default 5QI9 QoS)', ctx.pcf, smf, 'info', 'out')
+    push('NF', ctx.pcf, `PCF → SMF: SM policy (Session-AMBR, PCC rules, default 5QI${dflt5qi} QoS)`, ctx.pcf, smf, 'info', 'out')
     if (ctx.bsf) {
       push('NF', ctx.bsf, 'Nbsf_Management_Register ← PCF (SUPI, UE-IP → PCF binding)', ctx.pcf, ctx.bsf, 'info', 'in')
     }
   }
   if (ctx.chf) {
+    const quotaMb = ctx.chfQuotaMb ?? 0
     push('NF', ctx.chf, 'Nchf_ConvergedCharging_Create ← SMF (online quota request, RG)', smf, ctx.chf, 'info', 'in')
-    push('NF', ctx.chf, 'CHF → SMF: Granted-Unit (GSU) quota → charging started', ctx.chf, smf, 'info', 'out')
+    push('NF', ctx.chf, `CHF → SMF: Granted-Unit (GSU) — granted quota = ${quotaMb > 0 ? `${quotaMb} MB` : 'unlimited'} → charging started`, ctx.chf, smf, 'info', 'out')
   }
   if (!ctx.upf) {
     push('NF', smf, 'UPF selection failed — no UPF → PDU Session Est. Reject (#26 insufficient resources)', smf, ue, 'error', 'out')
@@ -317,11 +403,39 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   }
   const upf = ctx.upf
   // PFCP N4 (SMF↔UPF): 수립 요청 SMF→UPF, 응답 UPF→SMF; PDU Accept SMF→UE; DRB RU→UE
-  push('NF', smf, 'PFCP N4 Session Establishment Request → UPF (PDR/FAR/QER, UE-IP alloc)', smf, upf, 'info', 'out')
-  push('NF', upf, `PFCP N4 Session Est Response — UE IP ${ctx.ueIp} assigned; N3 GTP-U tunnel armed`, upf, smf, 'info', 'out')
-  push('NF', smf, `PDU Session Est Accept (authorized-QoS-rules, Session-AMBR, QFI=1/5QI9, S-NSSAI SST=${pduSst}) → UE`, smf, ue, 'info', 'out')
-  push('RU', ru, 'RRCReconfiguration: DRB-1 setup (5QI9), N3 GTP-U TEID mapping', ru, ue, 'info', 'in')
+  const n4hb = ctx.n4HeartbeatSec ?? 0
+  push('NF', smf, `PFCP N4 Session Establishment Request → UPF (PDR/FAR/QER, UE-IP alloc; PFCP heartbeat interval = ${n4hb > 0 ? `${n4hb}s` : 'disabled'})`, smf, upf, 'info', 'out')
+  push('NF', upf, `PFCP N4 Session Est Response — UE IP ${ctx.ueIp} assigned; CN N3 (UL) GTP-U TEID allocated`, upf, smf, 'info', 'out')
+  // TS 23.502 §4.3.2.2.1: SMF는 N1(PDU Est Accept)+N2(Resource Setup) 를 AMF 경유로 전달 (SMF→AMF→gNB→UE).
+  push('NF', amf, `Namf_Communication_N1N2MessageTransfer ← SMF (N1: PDU Session Est Accept; N2: PDU Session Resource Setup Req Transfer, QFI=1/5QI${dflt5qi}, CN N3 UL TEID)`, smf, amf, 'info', 'in')
+  push('RU', ru, `NGAP PDU Session Resource Setup Request → gNB (N2 SM info, S-NSSAI SST=${pduSst}, QoS profile, CN N3 UL TEID)`, amf, ru, 'info', 'in')
+  push('NF', smf, `PDU Session Est Accept (authorized-QoS-rules, Session-AMBR, QFI=1/5QI${dflt5qi}, S-NSSAI SST=${pduSst}) → UE`, smf, ue, 'info', 'out')
+  // ── QoS-flow 프로파일 표면화 (TS 23.501 §5.7.2~4): 해석된 트래픽 종류의 5QI/Priority/ARP, GBR면 GFBR/MFBR ──
+  const qFiveqi = ctx.qosFiveqi ?? dflt5qi
+  const qPri = ctx.qosPriorityLevel != null ? `${ctx.qosPriorityLevel}` : '—'
+  const qArp = ctx.qosArpPriority != null ? `${ctx.qosArpPriority}` : '—'
+  const qGbrSuffix = ctx.qosGbr
+    ? `, GFBR/MFBR=${ctx.qosGfbrMbps ?? '?'}/${ctx.qosMfbrMbps ?? '?'} Mbps`
+    : ''
+  push('NF', smf, pick(lang,
+    `QoS Flow 프로파일 — 5QI=${qFiveqi}, Priority=${qPri}, ARP=${qArp}${qGbrSuffix} (authorized QoS rules)`,
+    `QoS Flow profile — 5QI=${qFiveqi}, Priority=${qPri}, ARP=${qArp}${qGbrSuffix} (authorized QoS rules)`,
+    `QoS Flow 配置 — 5QI=${qFiveqi}, Priority=${qPri}, ARP=${qArp}${qGbrSuffix} (授权QoS规则)`),
+    smf, ue, 'info', 'out')
+  // ── Reflective QoS (RQA/RQI, TS 23.501 §5.7.5): reflective_qos ON일 때만 방출 ──
+  if (ctx.reflectiveQos) {
+    push('NF', smf, pick(lang,
+      'Reflective QoS 활성(RQA set) — UL은 반영 QoS 규칙으로 DL QFI 매핑, 명시적 UL 규칙 없음',
+      'Reflective QoS enabled (RQA set) — UL maps to DL QFI via reflective QoS rule, no explicit UL rule',
+      '反射式QoS 已启用(RQA置位) — 上行通过反射QoS规则映射到下行QFI，无显式上行规则'),
+      smf, ue, 'info', 'out')
+  }
+  push('RU', ru, `RRCReconfiguration: DRB-1 setup (5QI${dflt5qi}), N3 GTP-U TEID mapping`, ru, ue, 'info', 'in')
   push('UE', ue, `RRCReconfigurationComplete — DRB up, PDU Session active, IP ${ctx.ueIp}`, ue, ru, 'info', 'out')
+  // gNB→AMF: 자원 설정 응답으로 AN(gNB) N3 DL TEID 회신 → SMF가 UPF에 N4 수정으로 DL 경로 완성.
+  push('RU', ru, 'NGAP PDU Session Resource Setup Response → AMF (AN N3 (DL) GTP-U TEID)', ru, amf, 'info', 'out')
+  push('NF', smf, 'Namf_Communication_N2InfoNotify ← AMF (AN N3 DL TEID) — SMF에 전달', amf, smf, 'info', 'in')
+  push('NF', upf, 'PFCP N4 Session Modification → UPF (AN N3 DL TEID) — N3 DL GTP-U tunnel armed', smf, upf, 'info', 'out')
   if (!ctx.dn) {
     push('NF', upf, 'Warning: DN (N6) not connected — no external reachability', upf, 'DN', 'warn', 'out')
   }
@@ -369,8 +483,9 @@ export function buildHandoverSteps(ctx: HandoverCtx): AttachStep[] {
     // SECTION A: Xn 기반 핸드오버 (TS 38.423 §8.2 / TS 23.502 §4.9.1.2) — AMF 미개입 준비단계.
     push('RU', src, `Xn Handover Request → ${tgt} (target NCGI, UE context, PDU session resources, K_gNB*)`, src, tgt, 'out')
     push('RU', tgt, `Xn Handover Request Acknowledge → ${src} (admitted DRB, target RRC reconfiguration)`, tgt, src, 'out')
-    push('RU', src, `Xn SN Status Transfer → ${tgt} (UL/DL PDCP SN, HFN per DRB)`, src, tgt, 'out')
+    // TS 37.340 §10.3: 소스가 HO 명령(RRCReconfiguration)을 UE에 먼저 전달한 뒤 SN Status Transfer 수행.
     push('UE', ue, `RRCReconfiguration (reconfigurationWithSync → target PCI ${ctx.targetPci ?? '?'}, RACH to target)`, src, ue, 'in')
+    push('RU', src, `Xn SN Status Transfer → ${tgt} (UL/DL PDCP SN, HFN per DRB)`, src, tgt, 'out')
     push('UE', ue, `RRCReconfigurationComplete → ${tgt} (Xn handover complete)`, ue, tgt, 'out')
     push('RU', tgt, `NGAP Path Switch Request → AMF (new NG-RAN, N3 DL TNL info of ${tgt})`, tgt, amf, 'out')
     push('NF', amf, `Nsmf_PDUSession_UpdateSMContext (Path Switch) → SMF → UPF: N3 DL path switched to ${tgt}`, amf, 'SMF', 'out')
@@ -386,7 +501,7 @@ export function buildHandoverSteps(ctx: HandoverCtx): AttachStep[] {
   push('UE', ue, `RRCReconfiguration (reconfigurationWithSync → target PCI ${ctx.targetPci ?? '?'}, RACH to target)`, src, ue, 'in')
   push('UE', ue, `RRCReconfigurationComplete → ${tgt} (Handover Complete)`, ue, tgt, 'out')
   push('RU', tgt, 'NGAP Handover Notify → AMF (UE arrived at target)', tgt, amf, 'out')
-  push('NF', amf, `Nsmf_PDUSession_UpdateSMContext (Path Switch) → SMF → UPF: N3 DL path switched to ${tgt}`, amf, 'SMF', 'out')
+  push('NF', amf, `Nsmf_PDUSession_UpdateSMContext (Handover Notify → UP path update) → SMF → UPF: N3 DL path switched to ${tgt}`, amf, 'SMF', 'out')
   if (ctx.upf) push('NF', ctx.upf, `GTP-U End Marker (type 254) → ${src}: in-order delivery, DL path → ${tgt}`, ctx.upf, src, 'out')
   push('NF', amf, `NGAP UEContextRelease → ${src} (source resources freed)`, amf, src, 'out')
   return S
@@ -586,7 +701,7 @@ export function buildMroFailureSteps(ctx: MroCtx, mro: MroType): AttachStep[] {
     push('UE', ue, `Measurement Report A3 (${tgt}) — HO triggered too early`, ue, src, 'out')
     push('UE', ue, `RRCReconfigurationWithSync → ${tgt}; RACH...`, src, ue, 'in', 'warn')
     push('UE', ue, `RLF at ${tgt} shortly after handover (T304 window / poor target)`, ue, tgt, 'out', 'error')
-    push('UE', ue, `RRCReestablishmentRequest → ${src} (re-establish back in SOURCE cell)`, ue, src, 'out')
+    push('UE', ue, `RRCReestablishmentRequest → ${src} (reestablishmentCause=handoverFailure, re-establish back in SOURCE cell)`, ue, src, 'out')
     push('RU', src, 'XnAP Retrieve UE Context → RRCReestablishment — MRO: handover-too-early', src, ue, 'out')
     push('RU', tgt, 'MRO: RLF report → decrease CIO / raise TTT / raise A3 offset (avoid premature HO)', tgt, tgt, 'out', 'warn')
   } else {
@@ -594,7 +709,7 @@ export function buildMroFailureSteps(ctx: MroCtx, mro: MroType): AttachStep[] {
     const third = ctx.thirdRu ?? ctx.sourceRu
     push('UE', ue, `Measurement Report A3 (${tgt}) → handover executed to ${tgt}`, ue, src, 'out')
     push('UE', ue, `RLF at ${tgt} soon after handover`, ue, tgt, 'out', 'error')
-    push('UE', ue, `RRCReestablishmentRequest → ${third} (a THIRD cell, neither source nor target)`, ue, third, 'out')
+    push('UE', ue, `RRCReestablishmentRequest → ${third} (reestablishmentCause=handoverFailure, a THIRD cell, neither source nor target)`, ue, third, 'out')
     push('RU', third, 'XnAP Retrieve UE Context → RRCReestablishment — MRO: handover-to-wrong-cell', third, ue, 'out')
     push('RU', tgt, 'MRO: wrong-cell → retune neighbor CIO so the correct target wins A3', tgt, tgt, 'out', 'warn')
   }
@@ -689,7 +804,7 @@ export function buildPositioningSteps(ctx: FlowCtx, opts?: PositioningOpts): Att
       ? 'target UE in MICO mode (CM-IDLE, paging suppressed) — cannot establish NAS connection for positioning'
       : 'target UE CM-IDLE → network-triggered Service Request paging: T3513 expired, no page response', amf, ue, 'out', 'warn')
     push('NF', amf, `Namf_Location_ProvidePositioningInfo response → ${gmlc}: error (UE unreachable)`, amf, gmlc, 'out', 'warn')
-    push('NF', gmlc, `Le: MT-LR response → ${client}: location FAILED — cause "UE unreachable" (positioningDataError)`, gmlc, client, 'out', 'error')
+    push('NF', gmlc, `Le: MT-LR response → ${client}: location FAILED — LCS cause "UE unreachable / absent subscriber"`, gmlc, client, 'out', 'error')
     return S
   }
 
@@ -707,7 +822,7 @@ export function buildPositioningSteps(ctx: FlowCtx, opts?: PositioningOpts): Att
     push('NF', lmf, `NRPPa PositioningInformationRequest → ${ru} (TRP info, PRS resource config request)`, lmf, ru, 'out')
     push('RU', ru, `NRPPa PositioningInformationResponse → ${lmf} (TRP PRS config, TRP/antenna geographic location)`, ru, lmf, 'out')
     push('NF', lmf, `NRPPa MeasurementRequest → ${ru}${trps > 1 ? ` (+${trps - 1} neighbour TRP)` : ''} (${method} measurement)`, lmf, ru, 'out')
-    push('RU', ru, `NRPPa MeasurementResponse → ${lmf} (${method === 'Multi-RTT' ? 'gNB Rx-Tx time diff' : method === 'DL-TDOA' ? 'UL-RTOA per TRP' : 'AoA/RSRP'})`, ru, lmf, 'out')
+    push('RU', ru, `NRPPa MeasurementResponse → ${lmf} (${method === 'Multi-RTT' ? 'gNB Rx-Tx time diff' : method === 'DL-TDOA' ? 'DL PRS transmission configured — no gNB Rx measurement (UE measures DL RSTD)' : 'AoA/RSRP'})`, ru, lmf, 'out')
   }
   push('UE', ue, `LPP ProvideLocationInformation → LMF (${method === 'E-CID' ? 'serving/neighbour RSRP + TA' : method === 'DL-TDOA' ? 'DL RSTD per TRP pair' : 'UE Rx-Tx time diff'})`, ue, lmf, 'out')
 

@@ -1,5 +1,5 @@
 // VoNR(IMS) 음성 통화 call flow 엔진.
-// 발신 UE → P-CSCF → I-CSCF → S-CSCF → (IPX/SEPP, 국가간) → 착신측 → RTP.
+// 발신 UE → P-CSCF → 발신 S-CSCF → (IPX/SEPP, 국가간) → 착신 I-CSCF → 착신 S-CSCF → 착신측 → RTP.
 // 각 단계에서 실제 SIP 메시지(INVITE/100/180/183/PRACK/200/ACK/BYE)를 로그로 흘린다.
 import { useEffect, useRef } from 'react'
 import { pick } from './i18n'
@@ -17,14 +17,17 @@ function inviteFlow(interPlmn: boolean): SipStep[] {
   const seq: SipStep[] = [
     { src: 'UE', node: 'P-CSCF', msg: 'SIP INVITE (sdp offer, AMR-WB) → P-CSCF', from: 'UE', to: 'P-CSCF' },
     { src: 'NF', node: 'P-CSCF', msg: '100 Trying', from: 'P-CSCF', to: 'UE' },
-    { src: 'NF', node: 'S-CSCF', msg: 'INVITE → I-CSCF → S-CSCF (iFC 평가, T-AS 트리거)', from: 'I-CSCF', to: 'S-CSCF' },
+    { src: 'NF', node: 'S-CSCF', msg: 'INVITE → 발신 S-CSCF (Service-Route, iFC 평가, T-AS 트리거)', from: 'P-CSCF', to: 'S-CSCF' },
   ]
   if (interPlmn)
     seq.push({ src: 'NF', node: 'SEPP', msg: 'INVITE → IPX 트렁크(SEPP/N32) → 상대 PLMN S-CSCF', from: 'S-CSCF', to: 'SEPP' })
   seq.push(
+    { src: 'NF', node: 'I-CSCF', msg: '착신 I-CSCF (Cx LIR/LIA → HSS/UDM: 착신 S-CSCF 조회)', from: 'I-CSCF', to: 'S-CSCF' },
     { src: 'NF', node: 'S-CSCF', msg: '착신측 S-CSCF → P-CSCF → 착신 UE 라우팅', from: 'S-CSCF', to: 'P-CSCF' },
-    { src: 'UE', node: 'P-CSCF', msg: '183 Session Progress (sdp answer) / PRACK', from: 'P-CSCF', to: 'UE' },
-    { src: 'NF', node: 'PCF', msg: 'Rx(AAR) → PCF → SMF: 전용 QoS Flow 5QI=1(GBR) 생성', from: 'P-CSCF', to: 'PCF' },
+    { src: 'NF', node: 'P-CSCF', msg: '183 Session Progress (SDP answer, precondition)', from: 'P-CSCF', to: 'UE' },
+    { src: 'UE', node: 'P-CSCF', msg: 'PRACK (precondition 확인)', from: 'UE', to: 'P-CSCF' },
+    { src: 'NF', node: 'P-CSCF', msg: '200 OK (PRACK)', from: 'P-CSCF', to: 'UE' },
+    { src: 'NF', node: 'PCF', msg: 'N5 / Npcf_PolicyAuthorization_Create → PCF → SMF: 전용 QoS Flow 5QI=1(GBR) 생성', from: 'P-CSCF', to: 'PCF' },
     { src: 'UE', node: 'P-CSCF', msg: '180 Ringing', from: 'P-CSCF', to: 'UE' },
   )
   return seq
@@ -159,7 +162,7 @@ export function useCallEngine() {
         if (forwardCall('CFNR', L ? '무응답 착신전환' : 'forward on no-reply')) return
       }
       s.addEvent('UE', 'info', '200 OK (착신 응답) → ACK', 'P-CSCF', undefined, imsi, 'P-CSCF', call.fromName)
-      s.addEvent('NF', 'info', 'RTP 미디어 스트림 개통 (AMR-WB, 5QI=1 GBR)', 'MGW', undefined, imsi, from.name, to.name)
+      s.addEvent('NF', 'info', 'RTP 미디어 end-to-end (UPF, AMR-WB, 5QI=1 GBR)', 'UPF', undefined, imsi, from.name, to.name)
       s.setCallPhase('active')
     }, delay)
     timers.current.push(tAns)
