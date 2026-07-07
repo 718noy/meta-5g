@@ -1,5 +1,6 @@
 import type { ProbeResult, SceneObject, SimResult, SpaceConfig, Zone } from './types'
 import { CATALOG, feederLossDb, getRadiator, objZone } from './types'
+import { useStore } from './store'
 
 // API 베이스: 개발(npm run dev)에서는 백엔드(8000)를 직접 호출,
 // 프로덕션 빌드(백엔드가 dist를 서빙)에서는 같은 오리진('')으로 상대 요청.
@@ -75,12 +76,17 @@ export function buildScene(
   const maxDim = Math.max(space.width, space.depth)
   const resolution = Math.min(Math.max(maxDim / 120, 0.5), 2.0)
 
+  // 씬 레벨 RF 설정 (스토어) — 물리엔진으로 전달
+  const rf = useStore.getState().rf
+
   return {
     engine,
     ceiling,
     space: { width: space.width, depth: space.depth, height: space.height },
     resolution,
-    path_loss_exp: 3.5, // 실내/도심 NLOS 평균 — 현실적 커버리지 경계(음영)
+    path_loss_exp: rf.path_loss_exp, // 경로손실 지수 (log-distance) — TR 38.901
+    noise_figure_db: rf.noise_figure_db, // 수신기 잡음지수 (dB) — TS 38.101-4
+    ue_pmax_dbm: rf.ue_pmax_dbm, // UE 최대 송신전력 (dBm) — TS 38.101-1 Pcmax
     gnbs,
     obstacles,
   }

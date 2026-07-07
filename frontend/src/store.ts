@@ -25,6 +25,8 @@ import {
   DEFAULT_NF,
   DEFAULT_UE_SIM,
   activeNf,
+  cellAdmissionOk,
+  cellAdmissionText,
   computeAllowedNssai,
   computeE2E,
   defaultImsi,
@@ -150,8 +152,20 @@ interface State {
     a2_threshold_dbm: number // A2: 서빙<임계 → 측정 시작/재선택 고려
     t310_ms: number // RLF: 물리계층 문제 지속 시 T310 만료→RLF
     n310: number // 연속 out-of-sync 지시 횟수
+    n311?: number // in-sync 지시 횟수 → T310 정지 (TS 38.331). default 1
+    t304_ms?: number // 핸드오버 실행 타이머 (TS 38.331). default 500
     call_drop_rsrp_dbm: number // 이 RSRP 밑으로 떨어지면 통화 드롭 (Qout 근사)
     rlf_rsrp_dbm: number // RLF 판정 RSRP 문턱 (Qout) — 이 밑이면 무선링크 실패
+  }
+  // 씬 레벨 RF 파라미터 (TR 38.901 / TS 38.101) — 전파/링크버짓 모델 입력
+  rf: {
+    path_loss_exp: number // 경로손실 지수 (log-distance) — TR 38.901
+    noise_figure_db: number // 수신기 잡음지수 (dB)
+    ue_pmax_dbm: number // UE 최대 송신전력 (dBm) — TS 38.101 Pcmax
+  }
+  // 가입/구독 프로파일 — UE-AMBR (TS 23.501 §5.7.1.6)
+  subscription: {
+    ue_ambr_mbps: number // UE의 세션 전체에 걸친 non-GBR 집계 상한
   }
   selectedId: string | null
   selectedIds: string[] // 다중 선택 (박스 선택). selectedId는 대표(첫 항목)
@@ -242,6 +256,7 @@ interface State {
   setCeiling: (v: boolean) => void
   setFloorPlan: (dataUrl: string | null) => void
   addSlice: (zone: Zone, sst: number, sd: string) => void
+  updateSlice: (id: string, patch: Partial<Slice>) => void
   removeSlice: (id: string) => void
   autoPlanPci: () => void
   applyLayoutPreset: (preset: 'spacious' | 'office' | 'factory' | 'warehouse' | 'hall' | 'cafe', zone?: Zone) => void
@@ -252,7 +267,9 @@ interface State {
   goToZone: (zone: Zone) => void
   siteDown: { A: boolean; B: boolean } // 데이터센터 사이트 장애 (geo-redundancy 절체 시뮬)
   setSiteDown: (site: 'A' | 'B', down: boolean) => void
-  setMobility: (patch: Partial<{ a3_offset_db: number; hysteresis_db: number; ttt_ms: number }>) => void
+  setMobility: (patch: Partial<State['mobility']>) => void
+  setRf: (patch: Partial<State['rf']>) => void
+  setSubscription: (patch: Partial<State['subscription']>) => void
   bulkApplyMobility: () => void // PART 10: 전역 A3/CIO 값을 모든 RU(gnb)에 일괄 적용
   setSim: (zone: Zone, sim: SimResult | null) => void
   setSimStatus: (s: SimStatus) => void
@@ -308,6 +325,8 @@ interface State {
     coreDn: Record<Zone, boolean>
     slices: Slice[]
     space: SpaceConfig
+    rf?: State['rf'] // 씬 RF 파라미터 — undo 대상 (구 스냅샷 호환 위해 optional)
+    subscription?: State['subscription'] // 가입 프로파일 — undo 대상 (구 스냅샷 호환 위해 optional)
     ranUnits?: RanUnit[] // RAN 논리 유닛 — coreNfs와 동일하게 undo 대상 (구 스냅샷 호환 위해 optional)
     // BUG6: UE 런타임 맵도 스냅샷에 포함 — UE 삭제 실행취소 시 IMSI/전원/차단/부가서비스 복원.
     personImsi?: Record<string, string>
@@ -436,6 +455,8 @@ function loadPersisted(): Partial<State> | null {
       space: d.space, objects: d.objects, coreNfs: d.coreNfs, coreDn: d.coreDn,
       ranArch: d.ranArch, ranUnits: d.ranUnits ?? [], homeZone: d.homeZone, ceiling: d.ceiling, slices: d.slices,
       mobility: d.mobility, ueSim: d.ueSim, floorPlan, lang: d.lang,
+      rf: d.rf ?? { path_loss_exp: 3.5, noise_figure_db: 7, ue_pmax_dbm: 23 },
+      subscription: d.subscription ?? { ue_ambr_mbps: 1000 },
     }
   } catch {
     return null
@@ -462,8 +483,11 @@ export const useStore = create<State>((set, get) => ({
   mobility: {
     a3_offset_db: 3, hysteresis_db: 1, ttt_ms: 320,
     cio_db: 0, a2_threshold_dbm: -110, t310_ms: 1000, n310: 10,
+    n311: 1, t304_ms: 500,
     call_drop_rsrp_dbm: -118, rlf_rsrp_dbm: -118,
   },
+  rf: { path_loss_exp: 3.5, noise_figure_db: 7, ue_pmax_dbm: 23 },
+  subscription: { ue_ambr_mbps: 1000 },
   selectedId: null,
   selectedIds: [],
   marquee: false,
@@ -709,6 +733,18 @@ export const useStore = create<State>((set, get) => ({
     get().addEvent('RU', 'info', `Mobility(A3) param: ${desc}`)
   },
 
+  setRf: (patch) => {
+    set((s) => ({ rf: { ...s.rf, ...patch } }))
+    const desc = Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(', ')
+    get().addEvent('RU', 'info', `RF param: ${desc}`)
+  },
+
+  setSubscription: (patch) => {
+    set((s) => ({ subscription: { ...s.subscription, ...patch } }))
+    const desc = Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(', ')
+    get().addEvent('NF', 'info', `Subscription(UE-AMBR) param: ${desc}`)
+  },
+
   bulkApplyMobility: () => {
     const { mobility } = get()
     const patch = {
@@ -933,6 +969,15 @@ export const useStore = create<State>((set, get) => ({
         `Slice added: ${nm} (SST=${sst}, SD=${sd}) @ PLMN-${zone}`,
         `新增切片: ${nm} (SST=${sst}, SD=${sd}) @ PLMN-${zone} — NSSF 注册`))
   },
+  updateSlice: (id, patch) => {
+    set((s) => ({ slices: s.slices.map((x) => (x.id === id ? { ...x, ...patch } : x)) }))
+    const desc = Object.entries(patch).map(([k, v]) => `${k}=${v}`).join(', ')
+    get().addEvent('NF', 'info',
+      pick(get().lang,
+        `슬라이스 수정: ${desc} — NSSF/NRF 갱신`,
+        `Slice updated: ${desc}`,
+        `切片更新: ${desc} — NSSF/NRF 更新`))
+  },
   removeSlice: (id) => set((s) => ({ slices: s.slices.filter((x) => x.id !== id) })),
 
   // 자동 PCI 계획 (ACP) — 인접 셀 간 mod-3/mod-30 충돌 회피 그리디 배정.
@@ -1059,6 +1104,38 @@ export const useStore = create<State>((set, get) => ({
             `${target?.name}: 流量/通话不可 — 核心不可达(${e2e.missing.join(', ')})`),
           target?.name, undefined, imsi)
         return true
+      }
+      // 라디오 접속(admission) 게이트 — cellBarred(SIB1) + S-기준(Srxlev>=0, Qrxlevmin). TS 38.304 §5.2.3.
+      // RRC_IDLE로 캠핑 불가 → 무서비스. (라디오 조건 — 시작 시 차단)
+      const admit = cellAdmissionOk(servingRu, rsrp ?? null)
+      if (!admit.ok) {
+        get().addEvent('RU', 'error',
+          pick(s0.lang,
+            `${target?.name}: 무서비스(RRC_IDLE) — ${cellAdmissionText(admit.reason, 'ko')}`,
+            `${target?.name}: no service (RRC_IDLE) — ${cellAdmissionText(admit.reason, 'en')}`,
+            `${target?.name}: 无服务(RRC_IDLE) — ${cellAdmissionText(admit.reason, 'zh')}`),
+          target?.name, undefined, imsi)
+        return true
+      }
+      // AMF 등록 혼잡(max_registered_ue) → Registration/Service Reject #22 Congestion (T3346).
+      // 등록시점 조건 — 신규 세션 시작만 차단(기존 세션은 유지). togglePersonUe의 등록 카운트와 동일.
+      const zoneT = objZone(target!)
+      const amfNf = activeNf(s0.coreNfs, zoneT, 'AMF', s0.siteDown)
+      if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
+        const registered = s0.objects.filter((o) =>
+          o.kind === 'person' && o.id !== id && (o.zone ?? 'A') === zoneT &&
+          s0.personUeOn[o.id] &&
+          imsiRegistered(s0.personImsi[o.id] ?? defaultImsi(s0.ueSim), s0.ueSim, s0.registeredImsis),
+        ).length
+        if (registered >= amfNf.max_registered_ue) {
+          get().addEvent('NF', 'error',
+            pick(s0.lang,
+              `${target?.name}: Registration/Service Reject #22 Congestion — AMF 등록 상한(${amfNf.max_registered_ue}) 초과, 백오프 T3346`,
+              `${target?.name}: Registration/Service Reject #22 congestion — AMF max_registered_ue(${amfNf.max_registered_ue}) exceeded, T3346 backoff`,
+              `${target?.name}: Registration/Service Reject #22 拥塞 — AMF 注册上限(${amfNf.max_registered_ue}) 超出, 回退 T3346`),
+            target?.name, undefined, imsi)
+          return true
+        }
       }
       return false
     }
@@ -1280,10 +1357,11 @@ export const useStore = create<State>((set, get) => ({
     )
     let serving: string | null = null
     let servPci: number | null = null
+    let servingObj: SceneObject | undefined
     let bd = Infinity
     for (const r of rus) {
       const d = (r.position[0] - obj.position[0]) ** 2 + (r.position[2] - obj.position[2]) ** 2
-      if (d < bd) { bd = d; serving = r.name; servPci = r.gnb?.pci ?? null }
+      if (d < bd) { bd = d; serving = r.name; servPci = r.gnb?.pci ?? null; servingObj = r }
     }
     const ueIp = `10.45.${zone === 'A' ? 0 : zone === 'B' ? 1 : 2}.${((obj.name.length * 7) % 250) + 2}`
     const imsi = s0.personImsi[id] ?? defaultImsi(s0.ueSim)
@@ -1292,6 +1370,39 @@ export const useStore = create<State>((set, get) => ({
     const ti = trafficInfo(s0.personTrafficType[id] ?? s0.trafficType)
     const requestedSst = [...new Set([1, ti.sst])]
     const { allowed } = computeAllowedNssai(s0.slices, zone, requestedSst)
+
+    // ── 접속(admission) 게이트 파라미터 — 각각 표준 3GPP 실패 원인으로 매핑 ──
+    // 1) S-criteria용 RSRP: probe가 있으면 그 값, 없으면 존 sim RSRP 그리드에서 UE 위치를 샘플
+    //    (capacity.ts personRsrp와 동형 — cell·nx/ny/nz 인덱싱, iy는 UE 높이 1.5m 슬라이스).
+    let rsrpDbm: number | null = s0.personProbes[id]?.rsrp_dbm ?? null
+    if (rsrpDbm == null) {
+      const sim = s0.sims[zone]
+      if (sim) {
+        const [cx, cy, cz] = sim.cell
+        const ix = Math.min(Math.max(Math.floor(obj.position[0] / cx), 0), sim.nx - 1)
+        const iy = Math.min(Math.max(Math.floor(1.5 / cy), 0), sim.ny - 1)
+        const iz = Math.min(Math.max(Math.floor(obj.position[2] / cz), 0), sim.nz - 1)
+        const r = sim.rsrp[ix + iy * sim.nx + iz * sim.nx * sim.ny]
+        rsrpDbm = Number.isFinite(r) ? r : null
+      }
+    }
+    // 2) SIB1 Qrxlevmin / cellBarred — 서빙 RU의 gNB 파라미터에서 읽는다.
+    const qRxLevMinDbm = servingObj?.gnb?.q_rx_lev_min_dbm ?? -120 // TS 38.304 §5.2.3.2
+    const cellBarred = servingObj?.gnb?.cell_barred === true // TS 38.331 SIB1 cellBarred
+    // 3) AMF 등록 상한 → #22 Congestion + T3346. 서빙 AMF의 존에서 등록(전원 ON + 가입 확인)된 UE 수.
+    const amfNf = activeNf(s0.coreNfs, zone, 'AMF', s0.siteDown)
+    const t3512Min = amfNf?.t3512_min ?? 54 // 4) AMF 주기적 등록 갱신 타이머 (Registration Accept)
+    let amfCongested = false
+    let t3346Min: number | undefined
+    if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
+      const registered = s0.objects.filter((o) =>
+        o.kind === 'person' && o.id !== id && (o.zone ?? 'A') === zone &&
+        s0.personUeOn[o.id] &&
+        imsiRegistered(s0.personImsi[o.id] ?? defaultImsi(s0.ueSim), s0.ueSim, s0.registeredImsis),
+      ).length
+      if (registered >= amfNf.max_registered_ue) { amfCongested = true; t3346Min = 12 }
+    }
+
     const steps = buildAttachSteps({
       ueName: obj.name, servingName: serving, pci: servPci,
       plmn: `${s0.ueSim.mcc}/${s0.ueSim.mnc}`, tac: '1', ueIp,
@@ -1299,6 +1410,7 @@ export const useStore = create<State>((set, get) => ({
       nrf: nf('NRF'), nssf: nf('NSSF'), pcf: nf('PCF'), udr: nf('UDR'), chf: nf('CHF'), bsf: nf('BSF'),
       dn: s0.coreDn[zone], zone, imsiRegistered: imsiRegistered(imsi, s0.ueSim, s0.registeredImsis),
       requestedSst, allowedSst: allowed, sliceSst: allowed.includes(ti.sst) ? ti.sst : allowed[0],
+      cellBarred, rsrpDbm, qRxLevMinDbm, amfCongested, t3346Min, t3512Min,
     })
 
     const token = attachTokens[id]
@@ -1343,10 +1455,27 @@ export const useStore = create<State>((set, get) => ({
     for (const p of persons) {
       if (!on) { next[p.id] = false; continue }
       const imsi = s.personImsi[p.id] ?? defaultImsi(s.ueSim)
-      const eligible =
+      const zoneP = objZone(p)
+      // 라디오 접속(admission): cellBarred(SIB1) + S-기준(Srxlev>=0). togglePersonTraffic의 ranBlocked와 동일.
+      const servingRu = servingRuFor(p, s.objects)
+      const rsrpP = s.personProbes[p.id]?.rsrp_dbm ?? null
+      let eligible =
         s.personUeOn[p.id] &&
         !s.personBarred[p.id] &&
-        imsiRegistered(imsi, s.ueSim, s.registeredImsis)
+        imsiRegistered(imsi, s.ueSim, s.registeredImsis) &&
+        cellAdmissionOk(servingRu, rsrpP).ok
+      // AMF 등록 혼잡(#22, T3346) — 등록시점 조건: 신규 트래픽 시작만 차단.
+      if (eligible) {
+        const amfNf = activeNf(s.coreNfs, zoneP, 'AMF', s.siteDown)
+        if (amfNf?.max_registered_ue && amfNf.max_registered_ue > 0) {
+          const registered = s.objects.filter((o) =>
+            o.kind === 'person' && o.id !== p.id && (o.zone ?? 'A') === zoneP &&
+            s.personUeOn[o.id] &&
+            imsiRegistered(s.personImsi[o.id] ?? defaultImsi(s.ueSim), s.ueSim, s.registeredImsis),
+          ).length
+          if (registered >= amfNf.max_registered_ue) eligible = false
+        }
+      }
       next[p.id] = eligible
     }
     set({ personTraffic: next })
@@ -1673,7 +1802,7 @@ export const useStore = create<State>((set, get) => ({
         version: 1,
         space: s.space, objects: s.objects, coreNfs: s.coreNfs, coreDn: s.coreDn,
         ranArch: s.ranArch, ranUnits: s.ranUnits, homeZone: s.homeZone, ceiling: s.ceiling, slices: s.slices,
-        mobility: s.mobility, ueSim: s.ueSim, floorPlan: s.floorPlan,
+        mobility: s.mobility, rf: s.rf, subscription: s.subscription, ueSim: s.ueSim, floorPlan: s.floorPlan,
       },
       null, 2,
     )
@@ -1683,6 +1812,9 @@ export const useStore = create<State>((set, get) => ({
     set((s) => ({
       objects: snap.objects, coreNfs: snap.coreNfs, coreDn: snap.coreDn,
       slices: snap.slices, space: snap.space, selectedId: null, dragging: null,
+      // 씬 RF / 가입 프로파일도 undo 대상 (구 스냅샷 호환: 없으면 현재 값 유지).
+      rf: snap.rf ?? s.rf,
+      subscription: snap.subscription ?? s.subscription,
       // RAN 논리 유닛도 coreNfs와 동일하게 복원 (구 스냅샷 호환: 없으면 현재 값 유지).
       ranUnits: snap.ranUnits ?? s.ranUnits,
       // BUG6: 스냅샷에 담긴 UE 런타임 맵을 복원 (없으면 현재 값 유지 — 구 스냅샷 호환).
@@ -1926,6 +2058,7 @@ export const useStore = create<State>((set, get) => ({
         ranUnits: d.ranUnits ?? [],
         homeZone: d.homeZone ?? 'A', ceiling: d.ceiling ?? true,
         slices: d.slices ?? [], mobility: d.mobility ?? get().mobility,
+        rf: d.rf ?? get().rf, subscription: d.subscription ?? get().subscription,
         ueSim: sim, floorPlan: d.floorPlan ?? null, selectedId: null,
         // 임포트는 씬을 교체하므로 이전 씬의 런타임 UE 맵을 초기화하고 새 IMSI 맵을 심는다.
         personImsi,
@@ -2291,6 +2424,7 @@ export const useStore = create<State>((set, get) => ({
       s.ranArch === prev.ranArch && s.ranUnits === prev.ranUnits && s.homeZone === prev.homeZone &&
       s.ceiling === prev.ceiling &&
       s.slices === prev.slices && s.mobility === prev.mobility && s.ueSim === prev.ueSim &&
+      s.rf === prev.rf && s.subscription === prev.subscription &&
       s.space === prev.space && s.floorPlan === prev.floorPlan && s.lang === prev.lang
     )
       return
@@ -2301,7 +2435,7 @@ export const useStore = create<State>((set, get) => ({
       const core = {
         version: 1, space: st.space, objects: st.objects, coreNfs: st.coreNfs,
         coreDn: st.coreDn, ranArch: st.ranArch, ranUnits: st.ranUnits, homeZone: st.homeZone, ceiling: st.ceiling,
-        slices: st.slices, mobility: st.mobility, ueSim: st.ueSim, lang: st.lang,
+        slices: st.slices, mobility: st.mobility, rf: st.rf, subscription: st.subscription, ueSim: st.ueSim, lang: st.lang,
       }
       try {
         localStorage.setItem(PERSIST_KEY, JSON.stringify(core))

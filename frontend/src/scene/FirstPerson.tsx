@@ -5,7 +5,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import * as api from '../api'
-import { buildAttachSteps, buildHandoverSteps } from '../attach'
+import { buildAttachSteps, buildHandoverSteps, buildMroFailureSteps } from '../attach'
 import { LOGT, pick } from '../i18n'
 import { useStore } from '../store'
 import type { SceneObject, Zone } from '../types'
@@ -112,6 +112,10 @@ export function FirstPerson() {
   const a3Since = useRef<number | null>(null)
   const wasA2 = useRef(false)
   const rlfSince = useRef<number | null>(null)
+  const n310Count = useRef(0) // RLF: 연속 out-of-sync 지시 누적 (n310 도달 시에만 T310 무장, TS 38.331 §5.3.10.3)
+  const n311Count = useRef(0) // RLF: 연속 in-sync 지시 누적 (n311 도달 시 out-of-sync/T310 리셋)
+  const t304Since = useRef<number | null>(null) // 핸드오버 실행 타이머(T304): 타겟 동기 획득 창
+  const t304Src = useRef<{ id: string; name: string } | null>(null) // T304 실패 시 재수립할 소스 셀
   const activeZone = useRef<Zone>('A') // 현재 걷고 있는 존 (이 존 경계 안으로 클램프)
   const gotoZoneReq = useStore((s) => s.gotoZoneReq)
 
@@ -298,20 +302,74 @@ export function FirstPerson() {
             }
           }
 
-          // RLF: 서빙 RSRP가 매우 낮게(rlf_rsrp_dbm 이하) T310 동안 지속 → Radio Link Failure → 재접속
-          if (cur && cur.rsrp_dbm < rlf_rsrp_dbm) {
+          // T304: 핸드오버 실행 타이머 (TS 38.331 ReconfigurationWithSync / TS 38.300 §9.2.6).
+          // HO 직후 t304_ms 창 안에서 타겟(신 서빙) RSRP가 rlf 임계 이하이면 = 죽어가는 셀로 HO / 타겟 RACH 실패
+          // → Handover Failure → RRC 재수립(too-early, 소스로 복귀). 창을 정상적으로 넘기면 동기 성공으로 해제.
+          // t304 너무 작으면 spurious HO 실패, 너무 크면 죽은 타겟에 계속 동기 시도.
+          if (t304Since.current !== null) {
             const nowMs = performance.now()
-            if (rlfSince.current === null) rlfSince.current = nowMs
-            else if (nowMs - rlfSince.current >= t310_ms) {
+            const t304Ms = st.mobility.t304_ms ?? 500
+            const tgtCell = p.cells.find((c) => c.id === servingId.current)
+            const src = t304Src.current
+            if (tgtCell && tgtCell.rsrp_dbm < rlf_rsrp_dbm) {
+              const amfNf = st.coreNfs.find((n) => n.zone === curZone && n.nf_type === 'AMF' && n.enabled)
+              const failSteps = buildMroFailureSteps(
+                { ueName: 'UE', sourceRu: src?.name ?? tgtCell.name, targetRu: tgtCell.name,
+                  amf: amfNf?.name ?? null, t310Ms: t310_ms, t304Ms },
+                'too-early',
+              )
+              const t304Imsi = defaultImsi(st.ueSim)
+              for (const fs of failSteps) st.addEvent(fs.source, fs.level, fs.msg, fs.node, fs.dir, t304Imsi, fs.from, fs.to)
+              st.addEvent('UE', 'error',
+                pick(st.lang,
+                  `T304 ${t304Ms}ms 내 HO 실패 — 타겟 ${tgtCell.name} 동기 실패(RSRP ${tgtCell.rsrp_dbm}dBm < ${rlf_rsrp_dbm}), RRC 재수립(소스 복귀)`,
+                  `T304 ${t304Ms}ms HO failure — target ${tgtCell.name} sync failed (RSRP ${tgtCell.rsrp_dbm}dBm < ${rlf_rsrp_dbm}), RRC re-establishment (revert to source)`,
+                  `T304 ${t304Ms}ms 切换失败 — 目标 ${tgtCell.name} 同步失败(RSRP ${tgtCell.rsrp_dbm}dBm < ${rlf_rsrp_dbm}),RRC 重建(回退源)`),
+                undefined, undefined, t304Imsi)
+              servingId.current = src?.id ?? servingId.current // 소스로 재수립
+              t304Since.current = null
+              t304Src.current = null
+              a3Since.current = null
+            } else if (nowMs - t304Since.current >= t304Ms) {
+              // 창 경과 + 타겟 정상 → 동기 성공, 타이머 해제
+              t304Since.current = null
+              t304Src.current = null
+            }
+          }
+
+          // RLF: 서빙 RSRP가 rlf_rsrp_dbm 이하로 n310회 연속(out-of-sync) → T310 무장,
+          // T310 만료까지 지속되면 Radio Link Failure → RRC 재수립. n311회 연속 in-sync면 T310 정지.
+          // (TS 38.331 §5.3.10.3) — n310↑ → RLF 느리게 선언(페이드 관용), 너무 낮으면 spurious RLF.
+          const n310Max = st.mobility.n310
+          const n311Max = st.mobility.n311 ?? 1
+          if (cur && cur.rsrp_dbm < rlf_rsrp_dbm) {
+            n311Count.current = 0
+            const nowMs = performance.now()
+            if (rlfSince.current === null) {
+              // 아직 T310 미무장 — out-of-sync 누적, n310 도달 시에만 무장
+              n310Count.current += 1
+              if (n310Count.current >= n310Max) rlfSince.current = nowMs
+            } else if (nowMs - rlfSince.current >= t310_ms) {
               st.addEvent('UE', 'warn',
                 koL
-                  ? `RLF (T310 ${t310_ms}ms 만료) — ${cur.name} 무선링크 실패, RRC 재수립 시도`
-                  : `RLF (T310 ${t310_ms}ms expired) — ${cur.name} radio link failure, RRC re-establishment`)
+                  ? `RLF (N310 ${n310Max} out-of-sync → T310 ${t310_ms}ms 만료) — ${cur.name} 무선링크 실패, RRC 재수립 시도`
+                  : `RLF (N310 ${n310Max} out-of-sync → T310 ${t310_ms}ms expired) — ${cur.name} radio link failure, RRC re-establishment`)
               servingId.current = best?.id ?? null // 재접속(셀 재선택)
               rlfSince.current = null
+              n310Count.current = 0
+              n311Count.current = 0
               a3Since.current = null
             }
+          } else if (cur) {
+            // in-sync 지시 누적 — n311회 연속이면 out-of-sync 카운트/T310 리셋(무장 해제)
+            n311Count.current += 1
+            if (n311Count.current >= n311Max) {
+              n310Count.current = 0
+              rlfSince.current = null
+            }
           } else {
+            n310Count.current = 0
+            n311Count.current = 0
             rlfSince.current = null
           }
 
@@ -320,10 +378,16 @@ export function FirstPerson() {
           } else if (best && best.id !== cur.id) {
             const bEff = best.rsrp_dbm + cioOf(best.id)
             const cEff = cur.rsrp_dbm + cioOf(cur.id)
-            if (bEff > cEff + a3_offset_db + hysteresis_db) {
+            // PART 15b: A3 파라미터를 서빙셀 자체 설정 우선(없으면 글로벌 폴백) — 셀별 튜닝 실효화.
+            // (TS 38.331 measObject/reportConfig, cellIndividualOffset) — 오설정 이웃 CIO/offset → 오셀 HO.
+            const servGnb = st.objects.find((o) => o.kind === 'gnb' && o.id === cur.id)?.gnb
+            const a3Off = servGnb?.a3_offset_db ?? a3_offset_db
+            const a3Hys = servGnb?.hysteresis_db ?? hysteresis_db
+            const a3Ttt = servGnb?.ttt_ms ?? ttt_ms
+            if (bEff > cEff + a3Off + a3Hys) {
               const nowMs = performance.now()
               if (a3Since.current === null) a3Since.current = nowMs
-              if (nowMs - a3Since.current >= ttt_ms) {
+              if (nowMs - a3Since.current >= a3Ttt) {
                 // PART 15: A3 조건이 TTT 동안 유지 → 실제 핸드오버 call flow 방출 후 셀 전환.
                 // 파라미터(a3_offset/hysteresis/TTT/CIO)가 발동 시점을 실제 결정한다.
                 const srcObj = st.objects.find((o) => o.kind === 'gnb' && o.id === cur.id)
@@ -331,19 +395,22 @@ export function FirstPerson() {
                 const amfNf = st.coreNfs.find((n) => n.zone === curZone && n.nf_type === 'AMF' && n.enabled)
                 const upfNf = st.coreNfs.find((n) => n.zone === curZone && n.nf_type === 'UPF' && n.enabled)
                 st.addEvent('UE', 'info',
-                  `${L.handover(cur.name, best.name, best.rsrp_dbm)} [A3 off=${a3_offset_db} hys=${hysteresis_db} TTT=${ttt_ms}ms CIO=${cioOf(best.id)}dB]`)
+                  `${L.handover(cur.name, best.name, best.rsrp_dbm)} [A3 off=${a3Off} hys=${a3Hys} TTT=${a3Ttt}ms CIO=${cioOf(best.id)}dB]`)
                 const hoSteps = buildHandoverSteps({
                   ueName: 'UE',
                   sourceRu: cur.name, targetRu: best.name,
                   amf: amfNf?.name ?? null, upf: upfNf?.name ?? null,
                   sourcePci: srcObj?.gnb?.pci ?? null, targetPci: tgtObj?.gnb?.pci ?? null,
-                  targetRsrp: best.rsrp_dbm, a3Offset: a3_offset_db, hysteresis: hysteresis_db,
-                  tttMs: ttt_ms, cioDb: cioOf(best.id),
+                  targetRsrp: best.rsrp_dbm, a3Offset: a3Off, hysteresis: a3Hys,
+                  tttMs: a3Ttt, cioDb: cioOf(best.id),
                 })
                 const hoImsi = defaultImsi(st.ueSim)
                 for (const hs of hoSteps) st.addEvent(hs.source, hs.level, hs.msg, hs.node, hs.dir, hoImsi, hs.from, hs.to)
                 servingId.current = best.id
                 a3Since.current = null
+                // T304 실행 타이머 시작(ReconfigurationWithSync) — 다음 틱부터 타겟 동기 획득 감시.
+                t304Since.current = performance.now()
+                t304Src.current = { id: cur.id, name: cur.name }
               }
             } else {
               a3Since.current = null

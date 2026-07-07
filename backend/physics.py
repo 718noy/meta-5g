@@ -167,6 +167,7 @@ def simulate(scene: dict) -> dict:
     gnbs = [g for g in scene.get("gnbs", []) if g.get("enabled", True)]
     obstacles = scene.get("obstacles", [])
     ple = float(scene.get("path_loss_exp", 3.5))
+    nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 수신기 잡음지수 (TS 38.101-4)
     ceil_h = h if scene.get("ceiling", True) else None
 
     nx = max(int(round(w / res)), 2)
@@ -212,7 +213,7 @@ def simulate(scene: dict) -> dict:
     weight = np.where(is_serving, 0.0, np.where(same_mod3, 2.0, 1.0))  # (G,N)
     interference_mw = np.sum(powers_mw * weight, axis=0)
     bw_hz = np.array([float(g.get("bandwidth_mhz", 100.0)) * 1e6 for g in gnbs])
-    noise_dbm = -174.0 + 10.0 * np.log10(bw_hz[serving]) + NOISE_FIGURE_DB
+    noise_dbm = -174.0 + 10.0 * np.log10(bw_hz[serving]) + nf
     noise_mw = np.power(10.0, noise_dbm / 10.0)
     sinr_db = 10.0 * np.log10(best_mw / (interference_mw + noise_mw))
 
@@ -274,9 +275,36 @@ FIVEQI_MDBV = {82: 5600, 83: 1354, 84: 1354, 85: 255}
 IOT_CE_5QI = {90}
 # 코어/전송 지연(UPF+N3/N6 근사) — delay-critical 예산에서 무선 큐잉 여유 계산에 차감.
 CORE_TRANSPORT_DELAY_MS = 2.0
+# DRX 페이징/웨이크업 지연 근사 — 짧은 DRX 주기의 절반 수준(~40ms 주기 → +20ms). TS 38.321 §5.7.
+DRX_PAGING_LATENCY_MS = 20.0
+
+# ── 뉴머롤로지(SCS) ── TS 38.211/38.104
+def _slot_ms(scs_khz: int) -> float:
+    """슬롯 길이(ms) = 1 / 2^μ,  μ = log2(scs_khz/15). 15→1.0, 30→0.5, 60→0.25, 120→0.125."""
+    mu = np.log2(max(float(scs_khz), 15.0) / 15.0)
+    return float(1.0 / (2.0 ** mu))
 
 
-def _qos_metrics(fiveqi: int, cell_load: float, sinr_db: float, pdcp_dup: bool = False) -> dict:
+# TS 38.104 표 (대역폭 MHz → SCS kHz → 최대 전송 RB 수 N_RB). 가드밴드 제외 유효 RB.
+NR_MAX_RB = {
+    20: {15: 106, 30: 51, 60: 24},
+    40: {15: 216, 30: 106, 60: 51},
+    100: {30: 273, 60: 135, 120: 66},
+}
+
+
+def _usable_prbs(bw_mhz: float, scs_khz: int) -> int:
+    """유효(가드밴드 제외) PRB 수 — TS 38.104 표, 미표기 조합은 근사식.
+    근사: N_RB ≈ floor(대역폭 × 0.95 / RB대역폭),  RB대역폭(MHz) = 12·scs_khz/1000."""
+    tab = NR_MAX_RB.get(int(round(bw_mhz)))
+    if tab and int(scs_khz) in tab:
+        return tab[int(scs_khz)]
+    rb_bw_mhz = 12.0 * float(scs_khz) / 1000.0  # 한 RB의 대역폭(MHz)
+    return max(int(np.floor(bw_mhz * 0.95 / rb_bw_mhz)), 1)
+
+
+def _qos_metrics(fiveqi: int, cell_load: float, sinr_db: float, pdcp_dup: bool = False,
+                 scs_khz: int = 30, drx: bool = False) -> dict:
     """QoS 스케줄러 관점 지표: 지연/지터/패킷손실.
     혼잡(cell_load>1)이면 큐잉 지연 증가. GBR(고우선)은 완만, 비GBR은 급증.
     나쁜 무선품질(낮은 SINR)은 HARQ 재전송으로 지연·손실 증가.
@@ -296,6 +324,11 @@ def _qos_metrics(fiveqi: int, cell_load: float, sinr_db: float, pdcp_dup: bool =
     # 기본 지연 = 전송지연 + 스케줄링. delay-critical은 mini-slot/configured grant/선점으로
     # 무혼잡 시 예산 안(~1.5ms), 일반 서비스는 슬롯 스케줄링(~8ms) 기준.
     base = 1.5 if delay_critical else 8.0
+    # 뉴머롤로지: 슬롯 길이를 전송/스케줄링 지연에 반영 (높은 SCS → 짧은 슬롯 → 낮은 지연). TS 38.211
+    base += _slot_ms(scs_khz)
+    # DRX: 페이징/웨이크업 지연 페널티 (배터리↔지연 트레이드오프, 처리량 불변). TS 38.321 §5.7
+    if drx:
+        base += DRX_PAGING_LATENCY_MS
     # 혼잡 시 큐잉 지연 (비GBR이 훨씬 민감)
     queue = over * (25.0 if gbr else 120.0)
     radio_penalty = max(0.0, (5.0 - sinr_db)) * 1.5  # 저SINR HARQ 재전송
@@ -422,6 +455,7 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     gnbs = [g for g in scene.get("gnbs", []) if g.get("enabled", True)]
     obstacles = scene.get("obstacles", [])
     ple = float(scene.get("path_loss_exp", 3.5))
+    nf = float(scene.get("noise_figure_db", NOISE_FIGURE_DB))  # 수신기 잡음지수 (TS 38.101-4)
     ceil_h = float(scene.get("space", {}).get("height", 10.0)) if scene.get("ceiling", True) else None
     point = np.array([position], dtype=np.float64)
 
@@ -466,7 +500,7 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     serving_gnb = gnbs[si]
     bw_mhz = float(serving_gnb.get("bandwidth_mhz", 100.0))
     bw_hz = bw_mhz * 1e6
-    noise_mw = 10.0 ** ((-174.0 + 10.0 * np.log10(bw_hz) + NOISE_FIGURE_DB) / 10.0)
+    noise_mw = 10.0 ** ((-174.0 + 10.0 * np.log10(bw_hz) + nf) / 10.0)
     # PCI mod-3 충돌 이웃은 간섭 ×2 (DL 참조신호/스케줄링 겹침)
     s_mod3 = int(serving_gnb.get("pci", 0)) % 3
     interference = 0.0
@@ -491,7 +525,11 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     #   4x4 MIMO: 레이어 2→4 / CA: 유효 대역폭 2배
     qam_cap = 7.4 if serving_gnb.get("qam256", True) else 5.55
     layers = 4 if serving_gnb.get("mimo4x4", False) else 2
-    bw_eff = bw_mhz * (2.0 if serving_gnb.get("ca_enabled", False) else 1.0)
+    # 뉴머롤로지: 유효(가드밴드 제외) PRB → 유효 대역폭(≤ 공칭). 높은 SCS일수록 RB 폭↑·오버헤드 반영. TS 38.104
+    scs = int(serving_gnb.get("scs_khz", 30))
+    n_rb = _usable_prbs(bw_mhz, scs)
+    bw_usable = n_rb * 12.0 * scs / 1000.0  # MHz
+    bw_eff = bw_usable * (2.0 if serving_gnb.get("ca_enabled", False) else 1.0)
     # TDD DL 슬롯 비율 → DL 처리량은 DL 시간 점유율에 비례 (기본 0.75)
     dl_ratio = float(serving_gnb.get("tdd_dl_ratio", 0.75))
     se = min(np.log2(1.0 + 10.0 ** (sinr / 10.0)), qam_cap)
@@ -500,25 +538,32 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     freq = float(serving_gnb.get("freq_mhz", 3500.0))
 
     # UL 링크 버짓 / PRACH 접속 성공률
-    # 하향 RSRP로 경로손실 역산 → UE UL 송신전력 = min(pMax, P0 + alpha·PL + ramp)
-    # 수신 UL SINR가 데모드 임계(-8dB) 이상이면 접속 성공. 최대 재시도까지 램핑.
+    # 하향 RSRP로 경로손실 역산. UE Pmax(TS 38.101-1)로 상한 클램프.
     tx_dl = float(serving_gnb.get("tx_power_dbm", 30.0)) + float(serving_gnb.get("gain_dbi", 0.0))
     est_pl = tx_dl - raw_dbm[si]  # 경로손실 역산 (AGC 클램프 이전 원신호 사용)
-    ue_pmax = 23.0
+    ue_pmax = float(scene.get("ue_pmax_dbm", 23.0))  # UE 최대 송신전력 (TS 38.101-1 Pcmax)
     p0 = float(serving_gnb.get("p0_nominal_dbm", -90.0))
     alpha = float(serving_gnb.get("alpha", 0.8))
     ramp = float(serving_gnb.get("prach_ramp_step_db", 2.0))
     max_tx = int(serving_gnb.get("prach_max_tx", 10))
-    ul_noise_dbm = -174.0 + 10.0 * np.log10(bw_hz) + NOISE_FIGURE_DB
+    gnb_gain = float(serving_gnb.get("gain_dbi", 0.0))
+    ul_noise_dbm = -174.0 + 10.0 * np.log10(bw_hz) + nf
+
+    # PUSCH 개루프 전력제어 (P0 + alpha·PL, Pmax 클램프) → MsgA PUSCH / UL SINR. TS 38.213
+    pusch_tx = min(ue_pmax, p0 + alpha * est_pl)
+    ul_sinr = (pusch_tx - est_pl + gnb_gain) - ul_noise_dbm
+
+    # PRACH 프리앰블 개루프: preambleInitialReceivedTargetPower(prach_power_dbm)를 gNB 수신 목표로,
+    # UE 프리앰블 송신 = target + PL + (시도−1)·powerRampingStep, Pmax 클램프. 수신전력 ≥ 목표면
+    # preambleTransMax 내 검출 성공. 목표가 높거나 Pmax 부족(셀 경계)이면 실패. TS 38.321/38.213
+    prach_target_dbm = float(serving_gnb.get("prach_power_dbm", -104.0))
     radio_attempts = 0
     radio_ok = False  # 무선(경로손실/전력) 관점의 preamble 도달 성공
-    ul_sinr = -99.0
     for att in range(max_tx):
-        ue_tx = min(ue_pmax, p0 + alpha * est_pl + ramp * att)
-        ul_rx = ue_tx - est_pl + float(serving_gnb.get("gain_dbi", 0.0))
-        ul_sinr = ul_rx - ul_noise_dbm
+        ue_tx = min(ue_pmax, prach_target_dbm + est_pl + ramp * att)
+        ul_rx = ue_tx - est_pl + gnb_gain  # gNB 수신 프리앰블 전력
         radio_attempts = att + 1
-        if ul_sinr >= -8.0:
+        if ul_rx >= prach_target_dbm:
             radio_ok = True
             break
     if mod30_clash:
@@ -557,7 +602,9 @@ def probe(scene: dict, position: list, fiveqi: int = 9, cell_load: float = 0.0) 
     # QoS 지표(지연/손실/PDB) — delay-critical 5QI(82/83/84/85) 드롭·MDBV 포함.
     # PDCP 복제/중복 PDU 세션이 켜진 서빙셀이면 URLLC 무선 손실을 다이버시티로 절반.
     pdcp_dup = bool(serving_gnb.get("pdcp_duplication", False))
-    qos = _qos_metrics(fiveqi, cell_load, sinr, pdcp_dup)
+    # 뉴머롤로지(슬롯 지연)·DRX(페이징 웨이크 지연) 반영. TS 38.211 / TS 38.321 §5.7
+    drx_on = bool(serving_gnb.get("drx", False))
+    qos = _qos_metrics(fiveqi, cell_load, sinr, pdcp_dup, scs_khz=scs, drx=drx_on)
 
     # NB-IoT/LTE-M 커버리지 확장: 반복이 지연을 부풀리고 유효 처리량을 나눈다(협대역 상한).
     if iot_ce and ce is not None:

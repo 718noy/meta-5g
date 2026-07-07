@@ -248,6 +248,22 @@ function GnbParamsEditor({ obj }: { obj: SceneObject }) {
       <Num label="TAC" unit="" value={g.tac} min={0} max={16777215} step={1}
         title={pick(lang, '추적 영역 코드 — 페이징/등록 영역 구분 (경계에서 TAU 발생)', 'Tracking Area Code — defines paging/registration area (TAU at borders)', '跟踪区码 — 划分寻呼/注册区域 (边界触发TAU)')}
         onChange={(v) => updateGnb(obj.id, { tac: Math.round(v) })} />
+      {/* SIB1 cellBarred — 이 셀 캠핑 불가(무서비스), UE 재선택. TS 38.331/38.304 */}
+      <label className="field checkbox" title={pick(lang,
+        'SIB1 cellBarred=barred — 이 셀 캠핑 불가(무서비스), UE는 재선택. 표준: TS 38.331/38.304.',
+        'SIB1 cellBarred=barred — UE cannot camp on this cell (no service) and reselects. Std: TS 38.331/38.304.',
+        'SIB1 cellBarred=barred — UE 无法驻留此小区(无服务)并重选。标准: TS 38.331/38.304.')}>
+        <span>{pick(lang, '셀 접속 차단 (cell barred)', 'Cell barred', '小区禁止接入 (cell barred)')}</span>
+        <input type="checkbox" checked={g.cell_barred ?? false}
+          onChange={(e) => updateGnb(obj.id, { cell_barred: e.target.checked })} />
+      </label>
+      <Num label={pick(lang, 'Qrxlevmin (셀선택 최소수신)', 'Qrxlevmin (min RX for cell selection)', 'Qrxlevmin (小区选择最小接收)')}
+        unit="dBm" value={g.q_rx_lev_min_dbm ?? -120} min={-140} max={-30} step={1}
+        title={pick(lang,
+          "셀선택 S-기준 최소 RSRP(Qrxlevmin). 측정 RSRP가 이 값보다 낮으면(Srxlev<0) '적합 셀 없음(No Suitable Cell)'로 접속 불가. 표준: TS 38.304.",
+          "Minimum RSRP for cell selection S-criterion (Qrxlevmin). If measured RSRP is below this (Srxlev<0) → 'No Suitable Cell' and access is blocked. Std: TS 38.304.",
+          "小区选择S准则最小RSRP(Qrxlevmin)。测量RSRP低于此值(Srxlev<0)则'无合适小区(No Suitable Cell)'无法接入。标准: TS 38.304.")}
+        onChange={(v) => updateGnb(obj.id, { q_rx_lev_min_dbm: v })} />
       <label className="field" title={pick(lang, '부반송파 간격(SCS) — FR에 따라 유효값 제한 (FR1:15/30/60, FR2:60/120)', 'Subcarrier spacing — valid values depend on FR (FR1:15/30/60, FR2:60/120)', '子载波间隔 — 有效值取决于FR (FR1:15/30/60, FR2:60/120)')}>
         <span>SCS <em>(kHz · {fr})</em></span>
         <select value={validScs.includes(g.scs_khz) ? g.scs_khz : defaultScsForFr(fr)}

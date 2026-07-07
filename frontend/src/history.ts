@@ -17,6 +17,8 @@ interface Snap {
   slices: unknown
   space: unknown
   ranUnits: unknown // RAN 논리유닛(CU/DU) — 편집 실행취소 대상
+  rf: unknown // scene RF 설정(경로손실지수/노이즈지수/Pmax)
+  subscription: unknown // 가입자 파라미터(UE-AMBR)
   // BUG6: UE 런타임 맵을 스냅샷에 포함 — UE 삭제 실행취소 시 IMSI/전원/차단/부가서비스 복원.
   // 이 맵들은 HPA 틱(replicas/enabled)으로 바뀌지 않으므로 stableKey에 들어가도 자동 틱을 오염시키지 않는다.
   personImsi: unknown
@@ -32,7 +34,7 @@ function snapOf(): Snap {
   const s = useStore.getState()
   return {
     objects: s.objects, coreNfs: s.coreNfs, coreDn: s.coreDn,
-    slices: s.slices, space: s.space, ranUnits: s.ranUnits,
+    slices: s.slices, space: s.space, ranUnits: s.ranUnits, rf: s.rf, subscription: s.subscription,
     personImsi: s.personImsi, personUeOn: s.personUeOn, personTraffic: s.personTraffic,
     personTrafficType: s.personTrafficType, personBarred: s.personBarred, personSupp: s.personSupp,
     registeredImsis: s.registeredImsis,
@@ -78,7 +80,9 @@ export function useHistory() {
         state.coreDn === prev.coreDn &&
         state.slices === prev.slices &&
         state.space === prev.space &&
-        state.ranUnits === prev.ranUnits
+        state.ranUnits === prev.ranUnits &&
+        state.rf === prev.rf &&
+        state.subscription === prev.subscription
       )
         return
       if (applying.current) return

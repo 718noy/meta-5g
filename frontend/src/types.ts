@@ -123,6 +123,10 @@ export interface NfParams {
   max_replicas?: number // HPA 최대 레플리카 상한 (미지정 시 DEFAULT_MAX_REPLICAS)
   capacity_per_pod?: number // 파드당 UE/세션 용량 오버라이드 (미지정 시 NF_CAPACITY_PER_POD)
   throughput_per_pod?: number // 파드당 처리량 상한(Mbps, UL+DL 합) — 초과 시 HPA 스케일아웃
+  // NF-type-specific 접속 제어(admission) — 미지정/0 = 무제한.
+  max_registered_ue?: number // AMF 등록 UE 상한 (TS 23.501 §5.19.5). 0/undefined = 무제한
+  max_pdu_sessions?: number // SMF PDU 세션 상한 (TS 23.501 §5.6). undefined = 무제한
+  t3512_min?: number // AMF 주기적 등록 갱신 타이머 (분, TS 24.501). default 54
 }
 
 export const DEFAULT_MAX_REPLICAS = 16 // HPA 상한 기본값
@@ -136,6 +140,8 @@ export const DEFAULT_NF: NfParams = {
   auto_scale: true,
   max_replicas: DEFAULT_MAX_REPLICAS,
   throughput_per_pod: 5000, // 파드당 5 Gbps (UL+DL) 기본
+  t3512_min: 54, // AMF 주기적 등록 갱신 타이머 기본 (54분)
+  // max_registered_ue / max_pdu_sessions: 미지정(무제한)
 }
 
 // 사이트(데이터센터) 장애 상태 — geo-redundancy 절체 시뮬레이션용
@@ -172,6 +178,7 @@ export interface Slice {
   sd: string // Slice Differentiator (6 hex)
   name: string
   zone: Zone
+  session_ambr_mbps?: number // 세션/슬라이스 non-GBR 집계 상한 (TS 23.501 §5.7.2.6). undefined = 무제한
 }
 export const SST_NAMES: Record<number, { ko: string; en: string; zh: string }> = {
   1: { ko: 'eMBB (대용량 광대역)', en: 'eMBB (broadband)', zh: 'eMBB (大带宽)' },
@@ -263,6 +270,9 @@ export interface GnbParams {
   // delay-critical/URLLC 트래픽의 패킷 손실을 약 절반으로 (독립 경로 다이버시티). TS 38.323/23.501.
   pdcp_duplication: boolean
   du_id?: string // 이 RU가 프론트홀로 연결된 DU (RanUnit.id)
+  // 셀 선택/차단 (SIB1) — 접속성 게이팅
+  cell_barred?: boolean // SIB1 cellBarred (TS 38.331). true면 이 셀 접속 금지
+  q_rx_lev_min_dbm?: number // SIB1 cellSelectionInfo Qrxlevmin (TS 38.304). 셀 선택 최소 수신 레벨
 }
 
 // NR 주파수 레인지 (3GPP TS 38.104). FR1=sub-6GHz, FR2=mmWave.
@@ -772,6 +782,33 @@ export function ranChainText(reason: string, lang: 'ko' | 'en' | 'zh'): string {
   return lang === 'ko' ? e[0] : lang === 'zh' ? e[2] : e[1]
 }
 
+// 셀 접속 가능 여부(라디오 조건) — cellBarred(SIB1) + S-기준(Srxlev>=0). TS 38.304 §5.2.3.
+export function cellAdmissionOk(ru: SceneObject | undefined, rsrp_dbm: number | null): { ok: boolean; reason: string } {
+  if (!ru?.gnb) return { ok: true, reason: '' }
+  if (ru.gnb.cell_barred) return { ok: false, reason: 'cell-barred' }
+  const qmin = ru.gnb.q_rx_lev_min_dbm ?? -120
+  if (rsrp_dbm != null && rsrp_dbm - qmin < 0) return { ok: false, reason: 'no-suitable-cell' }
+  return { ok: true, reason: '' }
+}
+
+// 셀 접속 실패 사유(cellAdmissionOk의 reason 코드) → 3개국어 짧은 설명.
+export function cellAdmissionText(reason: string, lang: 'ko' | 'en' | 'zh'): string {
+  const M: Record<string, [string, string, string]> = {
+    'cell-barred': [
+      '셀 접속 차단(SIB1 cellBarred) — 캠핑 불가',
+      'Cell barred (SIB1 cellBarred) — cannot camp',
+      '小区禁止接入(SIB1 cellBarred) — 无法驻留',
+    ],
+    'no-suitable-cell': [
+      '적합 셀 없음(Srxlev<0, Qrxlevmin 미달) — 무서비스',
+      'No suitable cell (Srxlev<0, below Qrxlevmin) — out of service',
+      '无合适小区(Srxlev<0, 低于Qrxlevmin) — 无服务',
+    ],
+  }
+  const e = M[reason] ?? ['셀 접속 불가', 'Cell admission failed', '小区接入失败']
+  return lang === 'ko' ? e[0] : lang === 'zh' ? e[2] : e[1]
+}
+
 // RF 급전선 케이블 — 감쇠는 √f 스케일링 (기준: dB/100m @1GHz, 실측 스펙 기반)
 export const CABLE_TYPES = {
   jumper: { label: '점퍼 (LMR-400급)', db100m_1ghz: 12.8 },
@@ -830,4 +867,6 @@ export const DEFAULT_GNB: GnbParams = {
   mimo4x4: false,
   energy_saving: false,
   pdcp_duplication: false,
+  cell_barred: false,
+  q_rx_lev_min_dbm: -120,
 }

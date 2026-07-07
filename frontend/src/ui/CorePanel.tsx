@@ -183,6 +183,53 @@ function NfRow({ nf }: { nf: CoreNf }) {
               </label>
             </>
           )}
+          {/* AMF 전용 접속 제어(admission) — TS 24.501 §5.5.1 / TS 23.501 §5.19.5 */}
+          {nf.nf_type === 'AMF' && (
+            <>
+              <label className="field" title={pick(lang, 'AMF 등록 UE 상한(0=무제한). 초과 시 Registration Reject #22 혼잡 + T3346 백오프. TS 24.501 §5.5.1.', 'AMF max registered UE (0=unlimited). Excess → Registration Reject #22 Congestion + T3346 back-off. TS 24.501 §5.5.1.', 'AMF注册UE上限(0=无限). 超出→Registration Reject #22拥塞 + T3346退避。TS 24.501 §5.5.1。')}>
+                <span>{pick(lang, '최대 등록 UE', 'Max registered UE', '最大注册UE')} <em>(0=∞)</em></span>
+                <input
+                  type="number"
+                  value={nf.max_registered_ue ?? 0}
+                  min={0}
+                  max={10000000}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value)
+                    if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_registered_ue: Math.max(v, 0) })
+                  }}
+                />
+              </label>
+              <label className="field" title={pick(lang, '주기적 등록 타이머 T3512(분). Registration Accept에 전달. TS 24.501.', 'Periodic registration timer T3512 (min), delivered in Registration Accept. TS 24.501.', '周期注册定时器T3512(分), 在Registration Accept中传递。TS 24.501。')}>
+                <span>T3512 <em>(min)</em></span>
+                <input
+                  type="number"
+                  value={nf.t3512_min ?? 54}
+                  min={1}
+                  max={1080}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value)
+                    if (!Number.isNaN(v)) updateCoreNf(nf.id, { t3512_min: Math.min(Math.max(v, 1), 1080) })
+                  }}
+                />
+              </label>
+            </>
+          )}
+          {/* SMF 전용 PDU 세션 상한 — TS 23.501 §5.6 */}
+          {nf.nf_type === 'SMF' && (
+            <label className="field" title={pick(lang, 'SMF PDU 세션 상한(0=무제한). 초과 시 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF max PDU sessions (0=unlimited). Excess → 5GSM #26 Insufficient resources. TS 23.501 §5.6.', 'SMF PDU会话上限(0=无限). 超出→5GSM #26 Insufficient resources。TS 23.501 §5.6。')}>
+              <span>{pick(lang, '최대 PDU 세션', 'Max PDU sessions', '最大PDU会话')} <em>(0=∞)</em></span>
+              <input
+                type="number"
+                value={nf.max_pdu_sessions ?? 0}
+                min={0}
+                max={10000000}
+                onChange={(e) => {
+                  const v = parseInt(e.target.value)
+                  if (!Number.isNaN(v)) updateCoreNf(nf.id, { max_pdu_sessions: Math.max(v, 0) })
+                }}
+              />
+            </label>
+          )}
         </div>
       )}
     </div>
@@ -202,6 +249,7 @@ function ZoneCore({ zone }: { zone: Zone }) {
   const slices = useStore((s) => s.slices)
   const addSlice = useStore((s) => s.addSlice)
   const removeSlice = useStore((s) => s.removeSlice)
+  const updateSlice = useStore((s) => s.updateSlice)
   const [addType, setAddType] = useState<NfType>('AMF')
   const [addSst, setAddSst] = useState(1)
 
@@ -271,6 +319,41 @@ function ZoneCore({ zone }: { zone: Zone }) {
             <b>{s.name}</b>
             <span className="nf-meta">SST={s.sst} · SD={s.sd}</span>
             <button className="log-btn" onClick={() => removeSlice(s.id)} title={pick(lang, '이 슬라이스 삭제', 'Delete this slice', '删除此切片')}>✕</button>
+          </div>
+          <div className="nf-row-body">
+            <label className="field" title={pick(lang, '슬라이스/서비스 유형(SST): 1=eMBB, 2=URLLC, 3=MIoT. TS 23.501 §5.15.2.', 'Slice/Service Type (SST): 1=eMBB, 2=URLLC, 3=MIoT. TS 23.501 §5.15.2.', '切片/服务类型(SST): 1=eMBB, 2=URLLC, 3=MIoT。TS 23.501 §5.15.2。')}>
+              <span>SST</span>
+              <select
+                value={s.sst}
+                onChange={(e) => updateSlice(s.id, { sst: parseInt(e.target.value) })}
+              >
+                <option value={1}>1 · eMBB</option>
+                <option value={2}>2 · URLLC</option>
+                <option value={3}>3 · MIoT</option>
+              </select>
+            </label>
+            <label className="field" title={pick(lang, 'Slice Differentiator(SD) — 6자리 16진수. TS 23.003.', 'Slice Differentiator (SD) — 6 hex digits. TS 23.003.', 'Slice Differentiator(SD) — 6位十六进制。TS 23.003。')}>
+              <span>SD</span>
+              <input
+                type="text"
+                value={s.sd}
+                maxLength={6}
+                onChange={(e) => updateSlice(s.id, { sd: e.target.value.replace(/[^0-9a-fA-F]/g, '').slice(0, 6) })}
+              />
+            </label>
+            <label className="field" title={pick(lang, '슬라이스/세션 비-GBR 집계 대역 상한(Session-AMBR, 0=무제한). 초과분은 정책적 제한(스로틀). TS 23.501 §5.7.2.6.', 'Slice/session non-GBR aggregate bandwidth cap (Session-AMBR, 0=unlimited). Excess is policed/throttled. TS 23.501 §5.7.2.6.', '切片/会话非GBR聚合带宽上限(Session-AMBR, 0=无限). 超出部分被策略限速。TS 23.501 §5.7.2.6。')}>
+              <span>Session-AMBR <em>(Mbps, 0=∞)</em></span>
+              <input
+                type="number"
+                value={s.session_ambr_mbps ?? 0}
+                min={0}
+                max={100000}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value)
+                  if (!Number.isNaN(v)) updateSlice(s.id, { session_ambr_mbps: Math.max(v, 0) })
+                }}
+              />
+            </label>
           </div>
         </div>
       ))}
@@ -343,6 +426,7 @@ export function CorePanel() {
         ))}
       </div>
       <MobilitySection />
+      <RfSubscriptionSection />
       <RanSection />
       <ImsiRegistrySection />
     </div>
@@ -795,6 +879,8 @@ function MobilitySection() {
     a2_threshold_dbm: ['A2 임계 — 서빙셀이 이 아래로 떨어지면 측정 시작', 'A2 threshold — start measurements when serving drops below this', 'A2门限 — 服务小区低于此值时开始测量'],
     t310_ms: ['T310 — 하향품질 저하 지속 시 만료→무선링크실패(RLF)', 'T310 — expires on sustained poor downlink → Radio Link Failure', 'T310 — 下行质量持续变差超时→无线链路失败(RLF)'],
     n310: ['N310 — RLF 판정 전 연속 불량 지시 횟수', 'N310 — consecutive out-of-sync indications before RLF', 'N310 — 判定RLF前连续失步次数'],
+    n311: ['N311 — T310 해제(in-sync) 연속 카운트. TS 38.331.', 'N311 — consecutive in-sync indications to stop T310. TS 38.331.', 'N311 — 停止T310的连续同步(in-sync)指示次数。TS 38.331。'],
+    t304_ms: ['T304 — 핸드오버 실행 타이머(ms). 타겟 동기 실패 시 HO 실패→재수립. TS 38.331.', 'T304 — handover execution timer (ms); target sync failure → HO failure → re-establishment. TS 38.331.', 'T304 — 切换执行定时器(ms); 目标同步失败→切换失败→重建。TS 38.331。'],
     call_drop_rsrp_dbm: ['통화드롭 RSRP — 이 세기 아래로 떨어지면 통화 끊김', 'Call-drop RSRP — call drops when signal falls below this', '掉话RSRP — 信号低于此值时通话中断'],
     rlf_rsrp_dbm: ['RLF RSRP 기준 — 이 값 미만이 T310 동안 지속되면 무선링크실패(RLF)', 'RLF RSRP threshold — sustained below this for T310 declares Radio Link Failure (RLF)', 'RLF RSRP门限 — 低于此值持续T310则判定无线链路失败(RLF)'],
   }
@@ -836,6 +922,10 @@ function MobilitySection() {
         {num(pick(lang, '통화드롭', 'Call-drop', '掉话'), 'call_drop_rsrp_dbm', -140, -80, 1, 'dBm')}
         {num(pick(lang, 'RLF RSRP 기준', 'RLF RSRP threshold', 'RLF RSRP门限'), 'rlf_rsrp_dbm', -140, -80, 1, 'dBm')}
       </div>
+      <div className="mobility-row">
+        {num('N311', 'n311', 1, 10, 1, pick(lang, '회', 'cnt', '次'))}
+        {num('T304', 't304_ms', 100, 5000, 100, 'ms')}
+      </div>
       <button className="mobility-apply" onClick={bulkApplyMobility}
         title={pick(lang, '위 A3/CIO/TTT 값을 모든 RU에 한 번에 반영', 'Push the A3/CIO/TTT values above to every RU at once', '将上面的A3/CIO/TTT值一次性下发到所有RU')}>
         📶 {pick(lang, '모든 RU에 일괄 적용', 'Apply to all RUs', '应用到所有 RU')}
@@ -847,6 +937,90 @@ function MobilitySection() {
           'A3 (handover): triggers when a neighbor\'s RSRP stays above (serving + Offset + Hysteresis) for the TTT duration; per-cell CIO fine-tunes the boundary. A2: starts measurements once the serving cell drops below the threshold. T310/N310: sustained poor downlink expires T310, declaring Radio Link Failure (RLF). Lowering TTT surfaces ping-pong handovers; raising the threshold surfaces early handovers in the logs. "Apply to all RUs" pushes the A3/CIO values above to every RU at once.',
           'A3(切换): 当邻区 RSRP 在 TTT 时长内持续高于 (服务小区 + Offset + Hysteresis) 时触发切换，并用每小区 CIO 微调边界。A2: 服务小区低于门限时开始测量。T310/N310: 下行质量持续变差使 T310 超时，判定无线链路失败(RLF)。减小 TTT 会出现乒乓切换，提高门限会出现过早切换。"应用到所有 RU" 将上面的 A3/CIO 值一次性下发到每个 RU。',
         )}
+      </div>
+    </div>
+  )
+}
+
+// RF / 가입자 (RF & Subscription) — 씬 레벨 전파/링크버짓 + UE-AMBR 튜닝.
+// path_loss/noise/Pmax는 전역 전파모델 입력(TR 38.901 / TS 38.101), UE-AMBR은 가입 프로파일(TS 23.501).
+function RfSubscriptionSection() {
+  const lang = useStore((s) => s.lang)
+  const rf = useStore((s) => s.rf)
+  const subscription = useStore((s) => s.subscription)
+  const setRf = useStore((s) => s.setRf)
+  const setSubscription = useStore((s) => s.setSubscription)
+
+  return (
+    <div className="zone-core" style={{ marginTop: 10 }}>
+      <div className="zone-core-head">
+        📡 {pick(lang, 'RF / 가입자', 'RF & Subscription', 'RF / 签约')}
+      </div>
+      <div className="mobility-row">
+        <label className="field" title={pick(lang, '경로손실 지수 n(환경). 클수록 커버리지 급감. TR 38.901.', 'Path-loss exponent n (environment). Higher = coverage drops off faster. TR 38.901.', '路径损耗指数n(环境). 越大覆盖越快衰减。TR 38.901。')}>
+          <span>{pick(lang, '경로손실 지수', 'Path-loss exp', '路径损耗指数')} <em>(n)</em></span>
+          <input
+            type="number"
+            value={rf.path_loss_exp}
+            min={1.5}
+            max={5.0}
+            step={0.1}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value)
+              if (!Number.isNaN(v)) setRf({ path_loss_exp: Math.min(Math.max(v, 1.5), 5.0) })
+            }}
+          />
+        </label>
+        <label className="field" title={pick(lang, '수신 잡음지수 NF. 클수록 SINR 하락(전역). TS 38.101-4.', 'Receiver noise figure NF. Higher = lower SINR (global). TS 38.101-4.', '接收噪声系数NF. 越大SINR越低(全局)。TS 38.101-4。')}>
+          <span>{pick(lang, '잡음지수', 'Noise figure', '噪声系数')} <em>(dB)</em></span>
+          <input
+            type="number"
+            value={rf.noise_figure_db}
+            min={0}
+            max={20}
+            step={0.5}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value)
+              if (!Number.isNaN(v)) setRf({ noise_figure_db: Math.min(Math.max(v, 0), 20) })
+            }}
+          />
+        </label>
+        <label className="field" title={pick(lang, 'UE 최대 송신출력 Pmax. 낮으면 셀엣지 UL/PRACH 실패. TS 38.101-1.', 'UE max TX power Pmax. Low → cell-edge UL/PRACH failures. TS 38.101-1.', 'UE最大发射功率Pmax. 过低→小区边缘UL/PRACH失败。TS 38.101-1。')}>
+          <span>{pick(lang, 'UE Pmax', 'UE Pmax', 'UE Pmax')} <em>(dBm)</em></span>
+          <input
+            type="number"
+            value={rf.ue_pmax_dbm}
+            min={0}
+            max={33}
+            step={1}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value)
+              if (!Number.isNaN(v)) setRf({ ue_pmax_dbm: Math.min(Math.max(v, 0), 33) })
+            }}
+          />
+        </label>
+      </div>
+      <div className="mobility-row">
+        <label className="field" title={pick(lang, 'UE-AMBR: UE 전체 비-GBR 집계 대역 상한(0=무제한). TS 23.501 §5.7.1.6.', 'UE-AMBR: aggregate non-GBR bandwidth cap across all of a UE\'s sessions (0=unlimited). TS 23.501 §5.7.1.6.', 'UE-AMBR: UE全部非GBR聚合带宽上限(0=无限)。TS 23.501 §5.7.1.6。')}>
+          <span>UE-AMBR <em>(Mbps, 0=∞)</em></span>
+          <input
+            type="number"
+            value={subscription.ue_ambr_mbps}
+            min={0}
+            max={100000}
+            step={1}
+            onChange={(e) => {
+              const v = parseFloat(e.target.value)
+              if (!Number.isNaN(v)) setSubscription({ ue_ambr_mbps: Math.max(v, 0) })
+            }}
+          />
+        </label>
+      </div>
+      <div className="material-note">
+        {pick(lang,
+          '경로손실 지수·잡음지수·UE Pmax는 전역 전파/링크버짓 모델(TR 38.901 / TS 38.101) 입력으로 커버리지·SINR·셀엣지 접속에 영향을 줍니다. UE-AMBR은 가입 프로파일 상한으로, 초과분은 정책적으로 스로틀됩니다.',
+          'Path-loss exponent, noise figure and UE Pmax feed the global propagation/link-budget model (TR 38.901 / TS 38.101), affecting coverage, SINR and cell-edge access. UE-AMBR is a subscription cap; excess is policed/throttled.',
+          '路径损耗指数、噪声系数和UE Pmax作为全局传播/链路预算模型(TR 38.901 / TS 38.101)输入, 影响覆盖、SINR和小区边缘接入。UE-AMBR是签约上限, 超出部分被策略限速。')}
       </div>
     </div>
   )

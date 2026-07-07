@@ -14,6 +14,8 @@ import {
   NF_CAPACITY_PER_POD,
   ZONES,
   activeNf,
+  cellAdmissionOk,
+  cellAdmissionText,
   computeE2E,
   defaultImsi,
   imsiRegistered,
@@ -22,6 +24,23 @@ import {
   ranChainText,
   trafficInfo,
 } from './types'
+
+// NR 대역폭×SCS → 사용가능 PRB 수 (TS 38.104 Table 5.3.2-1). 백엔드 physics _usable_prbs / NR_MAX_RB와 동일 표.
+const NR_MAX_RB: Record<number, Record<number, number>> = {
+  20: { 15: 106, 30: 51, 60: 24 },
+  40: { 15: 216, 30: 106, 60: 51 },
+  100: { 30: 273, 60: 135, 120: 66 },
+}
+function usablePrbs(bwMhz: number, scsKhz: number): number {
+  const n = NR_MAX_RB[bwMhz]?.[scsKhz]
+  if (n != null) return n
+  // 표에 없는 (BW, SCS) 조합: 대역폭의 95%를 PRB(=12 서브캐리어×SCS)로 근사
+  return Math.max(1, Math.floor((bwMhz * 1000 * 0.95) / ((12 * scsKhz) / 1000)))
+}
+// SCS 수비학이 반영된 유효 대역폭(MHz) = n_rb×12×SCS. 클라이언트 용량모델을 백엔드 물리와 일치시킨다.
+function effectiveBwMhz(bwMhz: number, scsKhz: number): number {
+  return (usablePrbs(bwMhz, scsKhz) * 12 * scsKhz) / 1000
+}
 
 // 시뮬 그리드에서 SINR 샘플 → 처리량(Mbps) 산출 (백엔드 probe 없이 클라이언트 계산)
 function personThroughput(
@@ -49,7 +68,8 @@ function personThroughput(
   const g = ru.gnb!
   const qamCap = g.qam256 ? 7.4 : 5.55
   const layers = g.mimo4x4 ? 4 : 2
-  const bwEff = g.bandwidth_mhz * (g.ca_enabled ? 2 : 1)
+  // SCS 수비학 반영 유효 대역폭(백엔드 물리와 일치) — nominal BW 대신 사용해 SCS가 용량/UPF 부하에 반영되도록.
+  const bwEff = effectiveBwMhz(g.bandwidth_mhz, g.scs_khz) * (g.ca_enabled ? 2 : 1)
   const dlRatio = g.tdd_dl_ratio ?? 0.75
   const se = Math.min(Math.log2(1 + Math.pow(10, sinr / 10)), qamCap)
   // 백엔드 physics.probe와 동일 계수 (se·BW·0.567·layers·dl_ratio)
@@ -105,6 +125,7 @@ export function useCapacitySim() {
   const activeRef = useRef<Record<string, string | null>>({}) // (zone:type) → 활성 인스턴스 id (failover 감지)
   const nwdafTick = useRef(0) // SECTION B: NWDAF 주기 분석 로그 스로틀 (매 틱=1s, N틱마다 방출)
   const droppedUes = useRef<Set<string>>(new Set()) // RSRP/RAN 경로 상실로 "드롭" 상태인 배치 UE id (전이 시에만 로깅)
+  const pduRejectedUes = useRef<Set<string>>(new Set()) // SMF 세션 한도 초과로 #26 거부된 UE id (전이 시에만 로깅)
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -247,9 +268,37 @@ export function useCapacitySim() {
           const factor = wantNon > remain ? remain / wantNon : 1
           for (const id of nonGbrIds) served[id] = want[id] * factor
           const totalWant = grantIds.reduce((s, id) => s + want[id], 0)
+          // ---- Session-AMBR / UE-AMBR 집계 상한 폴리싱 (TS 23.501 §5.7.1.6 / §5.7.2.6) ----
+          // GBR 플로우는 AMBR 대상 아님(별도 GBR/MBR로 보장). 비-GBR 서빙 레이트만 UE-AMBR와
+          // 슬라이스(세션)-AMBR로 상한 클램프한다. 이는 정책적 rate cap이지 세션 거부(#26) 아님.
           for (const id of grantIds) {
-            personMbps[id] = served[id] ?? 0
-            personTrafficByZone[zone] += served[id] ?? 0
+            let rate = served[id] ?? 0
+            const ti = tiOf(id)
+            if (!ti.gbr && rate > 0) {
+              const ueAmbr = st.subscription.ue_ambr_mbps // UE 전체 non-GBR 집계 상한
+              // UE 트래픽 SST → 이 존에 프로비저닝된 슬라이스(SST 일치)로 세션-AMBR 해석
+              const slice = st.slices.find((s) => s.zone === zone && s.sst === ti.sst)
+              const sAmbr = slice?.session_ambr_mbps
+              let cap = ueAmbr
+              let src = 'UE-AMBR'
+              if (sAmbr != null && sAmbr < cap) { cap = sAmbr; src = 'Session-AMBR' }
+              if (rate > cap) {
+                rate = cap // 상한으로 폴리싱(드롭 아님)
+                if (!warned.current[`ambr-${id}`]) {
+                  warned.current[`ambr-${id}`] = true
+                  const im = st.personImsi[id] ?? defaultImsi(st.ueSim)
+                  const nm = st.objects.find((o) => o.id === id)?.name ?? id
+                  st.addEvent('RU', 'info',
+                    pick(st.lang,
+                      `${nm}: ${src} 도달 — 비-GBR 스루풋 ${cap.toFixed(1)}Mbps로 제한(집계 상한 폴리싱)`,
+                      `${nm}: ${src} reached — non-GBR throughput policed to ${cap.toFixed(1)}Mbps (aggregate cap)`,
+                      `${nm}: 达到 ${src} — 非GBR 吞吐限制至 ${cap.toFixed(1)}Mbps (聚合上限)`),
+                    nm, undefined, im)
+                }
+              } else warned.current[`ambr-${id}`] = false
+            }
+            personMbps[id] = rate
+            personTrafficByZone[zone] += rate
           }
 
           // 부하 지표: 접속 UE / max_ue 와 PRB 사용률 중 큰 값
@@ -369,6 +418,10 @@ export function useCapacitySim() {
         const wasDropped = droppedUes.current.has(id)
         const ranBroken = !servingRu || !chain.ok
         const coreBroken = !e2e.ok
+        // 라디오 접속(admission): cellBarred(SIB1) + S-기준(Srxlev>=0). TS 38.304 §5.2.3.
+        // 라디오 조건이므로 진행 중 트래픽/통화도 드롭한다(셀 차단/Qrxlevmin 상향 시). AMF 혼잡은 여기서 미적용(신규 등록만 차단).
+        const admit = cellAdmissionOk(servingRu, rsrp)
+        const admBroken = !admit.ok
         const rsrpLow = rsrp != null && rsrp < dropThr
 
         if (ranBroken || coreBroken) {
@@ -382,6 +435,19 @@ export function useCapacitySim() {
                 `${ue.name}: 트래픽 중단 — ${ranBroken ? ranChainText(chain.reason, 'ko') : `코어 미도달(${e2e.missing.join(', ')})`}`,
                 `${ue.name}: traffic stopped — ${ranBroken ? ranChainText(chain.reason, 'en') : `core unreachable (${e2e.missing.join(', ')})`}`,
                 `${ue.name}: 流量中断 — ${ranBroken ? ranChainText(chain.reason, 'zh') : `核心不可达(${e2e.missing.join(', ')})`}`),
+              ue.name, undefined, imsi)
+          }
+        } else if (admBroken) {
+          // 라디오 접속 조건 상실(셀 차단/S-기준 미달) → 트래픽 0 + 통화 드롭 (진행 중 세션도 끊김)
+          personMbps[id] = 0
+          if (inCall) clearTraffic.push(...dropActiveCall(id))
+          if (!wasDropped) {
+            droppedUes.current.add(id)
+            st.addEvent('RU', 'error',
+              pick(st.lang,
+                `${ue.name}: 트래픽 중단 — ${cellAdmissionText(admit.reason, 'ko')}`,
+                `${ue.name}: traffic stopped — ${cellAdmissionText(admit.reason, 'en')}`,
+                `${ue.name}: 流量中断 — ${cellAdmissionText(admit.reason, 'zh')}`),
               ue.name, undefined, imsi)
           }
         } else if (rsrpLow) {
@@ -425,6 +491,40 @@ export function useCapacitySim() {
       // 제거된 UE는 드롭 집합에서 정리 (메모리 누수 방지)
       for (const gone of [...droppedUes.current]) {
         if (!st.objects.some((o) => o.id === gone)) droppedUes.current.delete(gone)
+      }
+      // ---- SMF PDU 세션 한도 → 5GSM #26 Insufficient resources (TS 23.501 §5.6) ----
+      // 존별 활성 PDU 세션(트래픽 ON + 등록 + 슬라이스 프로비저닝) 수를 활성 SMF의 max_pdu_sessions와 비교.
+      // 한도 초과분 UE는 세션 수립 거부 → personMbps=0. droppedUes식 set으로 전이 시에만 로깅.
+      const pduNowRejected = new Set<string>()
+      for (const zone of ZONES) {
+        const smf = activeNf(st.coreNfs, zone, 'SMF', st.siteDown)
+        const cap = smf?.max_pdu_sessions
+        if (cap == null) continue
+        const sessUes = st.objects.filter((o) => {
+          if (o.kind !== 'person' || objZone(o) !== zone) return false
+          if (!st.personTraffic[o.id] || !st.personUeOn[o.id]) return false
+          const im = st.personImsi[o.id]
+          if (im && !imsiRegistered(im, st.ueSim, st.registeredImsis)) return false // 미등록 제외
+          return sliceHas(zone, tiOf(o.id).sst) // 슬라이스 미프로비저닝(#91)은 세션 아님
+        })
+        for (const ue of sessUes.slice(Math.max(cap, 0))) {
+          pduNowRejected.add(ue.id)
+          personMbps[ue.id] = 0
+          if (!pduRejectedUes.current.has(ue.id)) {
+            pduRejectedUes.current.add(ue.id)
+            const im = st.personImsi[ue.id] ?? defaultImsi(st.ueSim)
+            st.addEvent('NF', 'error',
+              pick(st.lang,
+                `${ue.name}: PDU 세션 거부 — SMF 세션 한도 초과 (5GSM #26 Insufficient resources)`,
+                `${ue.name}: PDU session rejected — SMF session limit exceeded (5GSM #26 Insufficient resources)`,
+                `${ue.name}: PDU 会话拒绝 — SMF 会话数超限 (5GSM #26 Insufficient resources)`),
+              ue.name, undefined, im)
+          }
+        }
+      }
+      // 한도 내로 복귀한 UE는 거부 집합에서 해제(전이 재로깅 허용) + 제거된 UE 정리
+      for (const id of [...pduRejectedUes.current]) {
+        if (!pduNowRejected.has(id)) pduRejectedUes.current.delete(id)
       }
       st.setPersonMbps(personMbps)
 

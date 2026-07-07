@@ -108,6 +108,13 @@ export interface AttachCtx {
   regType?: 'initial' | 'periodic' | 'mobility'
   mico?: boolean // Registration Accept에서 MICO 모드 협상 (MT 도달불가 트레이드오프)
   guti?: string // 재등록(periodic/mobility) 시 UE가 제시하는 5G-GUTI 표기
+  // ── 접속(admission) 게이트 — 각 파라미터를 표준 3GPP 실패 원인에 매핑 ──
+  cellBarred?: boolean // SIB1 cellBarred=barred (TS 38.331/38.304) → 캠핑 불가
+  rsrpDbm?: number | null // 서빙 셀에서 측정한 UE RSRP (S-criteria 판정용, Qrxlevmeas)
+  qRxLevMinDbm?: number // SIB1 cellSelectionInfo Qrxlevmin (TS 38.304 §5.2.3.2)
+  amfCongested?: boolean // AMF max_registered_ue 초과 → Registration Reject #22 Congestion
+  t3346Min?: number // #22 Congestion back-off 타이머 T3346 (분)
+  t3512Min?: number // AMF 주기적 등록 갱신 타이머 T3512 (분, Registration Accept)
 }
 
 function sstLabel(ssts: number[] | undefined): string {
@@ -140,7 +147,22 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   push('UE', ue, `Cell search: PSS/SSS detected — PCI ${ctx.pci ?? '?'}`, ru, ue, 'info', 'in')
   push('UE', ue, 'PBCH decoded → MIB (SFN, subCarrierSpacingCommon, pdcch-ConfigSIB1)', ru, ue, 'info', 'in')
   push('RU', ru, 'Broadcast SIB1 (cellSelectionInfo, servingCellConfigCommon, ra-ConfigCommon)', ru, ue, 'info', 'out')
-  push('UE', ue, `SIB1 acquired → PLMN ${ctx.plmn}, TAC ${ctx.tac}, cellBarred=notBarred`, ru, ue, 'info', 'in')
+  // SIB1 cellBarred (TS 38.331/38.304): barred이면 이 셀에 캠핑 불가 → intra-freq reselection, 서비스 불가.
+  const barred = ctx.cellBarred === true
+  push('UE', ue, `SIB1 acquired → PLMN ${ctx.plmn}, TAC ${ctx.tac}, cellBarred=${barred ? 'barred' : 'notBarred'}`, ru, ue, barred ? 'warn' : 'info', 'in')
+  if (barred) {
+    push('UE', ue, 'cell barred (SIB1) — intra-freq reselection, no service (RRC_IDLE)', ru, ue, 'warn', 'in')
+    return S
+  }
+  // S-criteria (TS 38.304 §5.2.3.2): Srxlev = Qrxlevmeas − Qrxlevmin. <0 이면 not suitable → 셀 선택 실패.
+  if (ctx.rsrpDbm != null && ctx.qRxLevMinDbm != null) {
+    const srxlev = ctx.rsrpDbm - ctx.qRxLevMinDbm
+    if (srxlev < 0) {
+      push('UE', ue, `S-criteria failed: Srxlev ${srxlev.toFixed(0)}dB (RSRP ${ctx.rsrpDbm.toFixed(0)}dBm − Qrxlevmin ${ctx.qRxLevMinDbm}dBm) < 0 — cell not suitable`, ru, ue, 'warn', 'in')
+      push('UE', ue, 'Cell search: no suitable/acceptable cell found — out of service (RRC_IDLE)', ue, ue, 'warn', 'in')
+      return S
+    }
+  }
   push('UE', ue, 'SIB2/SIB4 acquired (RACH-ConfigCommon, intra/inter-freq reselection)', ru, ue, 'info', 'in')
 
   // ── Random Access (Msg1~4) ── (Msg1/Msg3 UE→RU, Msg2/Msg4 RU→UE, Complete UE→RU)
@@ -158,15 +180,23 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   const amf = ctx.amf
   const regType = ctx.regType ?? 'initial'
   const guti = ctx.guti ?? '5G-GUTI'
+  const t3512 = ctx.t3512Min ?? 54 // AMF 주기적 등록 갱신 타이머 (Registration Accept가 운반)
   // NGAP Initial UE Message: gNB→AMF. NAS Registration Request: UE→AMF (RRC로 gNB 경유).
   push('RU', ru, 'NGAP InitialUEMessage → AMF (RAN-UE-NGAP-ID, NAS-PDU)', ru, amf, 'info', 'out')
+  // AMF admission (TS 24.501 §5.5.1 / §5.3.20, TS 23.501 §5.19.5): 등록 UE가 max_registered_ue 상한에
+  // 도달하면 신규 등록을 혼잡으로 거부하고 back-off T3346을 부여 → UE는 T3346 만료까지 재시도 금지.
+  if (ctx.amfCongested) {
+    const t3346 = ctx.t3346Min ?? 12
+    push('NF', amf, `Registration Reject (5GMM cause #22 congestion) — AMF at max_registered_ue; back-off timer T3346=${t3346} min → UE`, amf, ue, 'error', 'out')
+    return S
+  }
   if (regType === 'initial') {
     push('NF', amf, `Registration Request (SUCI, 5GS-registration-type=initial, Requested-NSSAI {${sstLabel(reqSst)}})`, ue, amf, 'info', 'in')
   } else if (regType === 'periodic') {
     // SECTION A: 주기 등록 갱신 — 기존 네이티브 5G 보안컨텍스트 재사용, PDU 재수립 없음.
     push('NF', amf, `Registration Request (${guti}, 5GS-registration-type=periodic-registration-updating)`, ue, amf, 'info', 'in')
     push('NF', amf, 'NAS integrity verified with existing native 5G security context (no re-authentication)', amf, amf, 'info', 'in')
-    push('NF', amf, `Registration Accept (5G-GUTI retained, TAI-list, T3512 restarted) → UE`, amf, ue, 'info', 'out')
+    push('NF', amf, `Registration Accept (5G-GUTI retained, TAI-list, T3512=${t3512} min restarted) → UE`, amf, ue, 'info', 'out')
     push('UE', ue, 'Registration Complete — periodic update done (RM-REGISTERED, CM-IDLE, no PDU re-establishment)', ue, amf, 'info', 'out')
     return S
   } else {
@@ -245,7 +275,7 @@ export function buildAttachSteps(ctx: AttachCtx): AttachStep[] {
   // ── Subscription / Context / Accept ──
   push('NF', ctx.udm, 'Nudm_SDM_Get ← AMF: subscription data (Access&Mobility, SMF-selection, UE-AMBR)', amf, ctx.udm, 'info', 'in')
   push('RU', ru, 'NGAP InitialContextSetupRequest → gNB (Allowed-NSSAI, UE-AMBR, K_gNB)', amf, ru, 'info', 'in')
-  push('NF', amf, `Registration Accept (5G-GUTI, TAI-list, Allowed-NSSAI {${sstLabel(allowed)}}, T3512${ctx.mico ? ', MICO-indication=raai (MICO mode)' : ''}) → UE`, amf, ue, 'info', 'out')
+  push('NF', amf, `Registration Accept (5G-GUTI, TAI-list, Allowed-NSSAI {${sstLabel(allowed)}}, T3512=${t3512} min${ctx.mico ? ', MICO-indication=raai (MICO mode)' : ''}) → UE`, amf, ue, 'info', 'out')
   if (ctx.mico) {
     push('UE', ue, 'MICO mode negotiated (T3324 active) — UE unreachable for MT while in CM-IDLE (no paging)', amf, ue, 'warn', 'in')
   }
