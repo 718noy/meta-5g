@@ -26,8 +26,8 @@ export function mapColor(t: number): [number, number, number, number] {
   const x = Math.min(Math.max(t, 0), 1)
   const first = STOPS[0]
   const last = STOPS[STOPS.length - 1]
-  if (x <= first.t) return first.rgba
-  if (x >= last.t) return last.rgba
+  if (x <= first.t) return [...first.rgba]
+  if (x >= last.t) return [...last.rgba]
   for (let i = 1; i < STOPS.length; i++) {
     if (x <= STOPS[i].t) {
       const a = STOPS[i - 1]
@@ -41,7 +41,7 @@ export function mapColor(t: number): [number, number, number, number] {
       ]
     }
   }
-  return last.rgba
+  return [...last.rgba]
 }
 
 export function cssGradient(): string {
