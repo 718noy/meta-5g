@@ -5,21 +5,22 @@ import { useCallback, useRef, useState } from 'react'
 // 헤더 안의 버튼/입력 위에서 시작한 포인터다운은 무시해 클릭을 방해하지 않는다.
 export function usePanelDrag() {
   const [off, setOff] = useState({ x: 0, y: 0 })
-  const drag = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null)
+  const drag = useRef<{ pointerId: number; sx: number; sy: number; ox: number; oy: number } | null>(null)
 
   const onHeaderPointerDown = useCallback(
     (e: React.PointerEvent) => {
       const el = e.target as HTMLElement
       if (el.closest('button, input, select, textarea, a, [data-nodrag]')) return
-      if (e.button !== 0) return
+      if (e.button !== 0 || drag.current) return
       e.preventDefault()
-      drag.current = { sx: e.clientX, sy: e.clientY, ox: off.x, oy: off.y }
+      drag.current = { pointerId: e.pointerId, sx: e.clientX, sy: e.clientY, ox: off.x, oy: off.y }
       const move = (ev: PointerEvent) => {
         const d = drag.current
-        if (!d) return
+        if (!d || ev.pointerId !== d.pointerId) return
         setOff({ x: d.ox + (ev.clientX - d.sx), y: d.oy + (ev.clientY - d.sy) })
       }
-      const up = () => {
+      const up = (ev: PointerEvent) => {
+        if (!drag.current || ev.pointerId !== drag.current.pointerId) return
         drag.current = null
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)

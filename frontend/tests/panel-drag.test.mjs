@@ -38,15 +38,44 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
     const { headerProps } = usePanelDrag()
     headerProps.onPointerDown({
       target: { closest: () => null },
-      button: 0, clientX: 10, clientY: 20, preventDefault() {},
+      pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
     })
     const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
-      clientX: 25, clientY: 45,
+      pointerId: 1, clientX: 25, clientY: 45,
     }))
     move()
     assert.deepEqual(updates, [{ x: 15, y: 25 }])
-    target.dispatchEvent(new Event(endEvent))
+    target.dispatchEvent(Object.assign(new Event(endEvent), { pointerId: 1 }))
     move()
     assert.equal(updates.length, 1, 'movement after the drag ends must be ignored')
+  })
+
+  test(`another pointer cannot move or end the active drag via ${endEvent}`, (t) => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+    const target = new EventTarget()
+    globalThis.window = target
+    updates.length = 0
+    t.after(() => {
+      if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+      else delete globalThis.window
+    })
+    const { headerProps } = usePanelDrag()
+    const down = (pointerId, clientX) => headerProps.onPointerDown({
+      target: { closest: () => null },
+      pointerId, button: 0, clientX, clientY: 20, preventDefault() {},
+    })
+    const dispatch = (type, pointerId) => target.dispatchEvent(Object.assign(new Event(type), {
+      pointerId, clientX: 25, clientY: 45,
+    }))
+    down(1, 10)
+    down(2, 100)
+    dispatch('pointermove', 2)
+    assert.deepEqual(updates, [], 'a second pointer must not take over the drag')
+    dispatch(endEvent, 2)
+    dispatch('pointermove', 1)
+    assert.deepEqual(updates, [{ x: 15, y: 25 }], 'the original pointer must remain active')
+    dispatch(endEvent, 1)
+    dispatch('pointermove', 1)
+    assert.equal(updates.length, 1, 'the original pointer must still end its own drag')
   })
 }
