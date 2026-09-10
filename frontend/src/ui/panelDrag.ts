@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 // 서브윈도우(패널)를 헤더로 드래그해 이동. CSS 기본 위치에서의 오프셋(transform)만 관리하므로
 // 리마운트(버튼 재클릭 시 key 변경) 시 오프셋이 0으로 돌아가 자동으로 디폴트 위치로 리셋된다.
@@ -6,6 +6,8 @@ import { useCallback, useRef, useState } from 'react'
 export function usePanelDrag() {
   const [off, setOff] = useState({ x: 0, y: 0 })
   const drag = useRef<{ pointerId: number; sx: number; sy: number; ox: number; oy: number } | null>(null)
+  const cleanupRef = useRef<(() => void) | null>(null)
+  useEffect(() => () => cleanupRef.current?.(), [])
 
   const onHeaderPointerDown = useCallback(
     (e: React.PointerEvent) => {
@@ -19,13 +21,18 @@ export function usePanelDrag() {
         if (!d || ev.pointerId !== d.pointerId) return
         setOff({ x: d.ox + (ev.clientX - d.sx), y: d.oy + (ev.clientY - d.sy) })
       }
-      const up = (ev: PointerEvent) => {
-        if (!drag.current || ev.pointerId !== drag.current.pointerId) return
+      const cleanup = () => {
         drag.current = null
         window.removeEventListener('pointermove', move)
         window.removeEventListener('pointerup', up)
         window.removeEventListener('pointercancel', up)
+        cleanupRef.current = null
       }
+      const up = (ev: PointerEvent) => {
+        if (!drag.current || ev.pointerId !== drag.current.pointerId) return
+        cleanup()
+      }
+      cleanupRef.current = cleanup
       window.addEventListener('pointermove', move)
       window.addEventListener('pointerup', up)
       window.addEventListener('pointercancel', up)

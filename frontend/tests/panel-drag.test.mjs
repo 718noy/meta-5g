@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import { getEventListeners } from 'node:events'
 import { registerHooks } from 'node:module'
 import test from 'node:test'
 
 const reactStub = `data:text/javascript,${encodeURIComponent(`
   export const updates = []
+  export const cleanups = []
+  export const useEffect = effect => { cleanups.push(effect()) }
   export const useCallback = callback => callback
   export const useRef = current => ({ current })
   export const useState = initial => [initial, value => updates.push(value)]
@@ -22,7 +25,9 @@ try {
 } finally {
   hooks.deregister()
 }
-const { updates } = await import(reactStub)
+const { updates, cleanups } = await import(reactStub)
+
+test.afterEach(() => { cleanups.length = 0 })
 
 for (const endEvent of ['pointerup', 'pointercancel']) {
   test(`${endEvent} ends panel dragging`, (t) => {
@@ -79,3 +84,30 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
     assert.equal(updates.length, 1, 'the original pointer must still end its own drag')
   })
 }
+
+test('unmounting a panel removes active drag listeners', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  updates.length = 0
+  t.after(() => {
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const { headerProps } = usePanelDrag()
+  headerProps.onPointerDown({
+    target: { closest: () => null },
+    pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
+  })
+  const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
+    pointerId: 1, clientX: 25, clientY: 45,
+  }))
+  move()
+  assert.deepEqual(updates, [{ x: 15, y: 25 }])
+  for (const cleanup of cleanups) cleanup?.()
+  for (const type of ['pointermove', 'pointerup', 'pointercancel']) {
+    assert.equal(getEventListeners(target, type).length, 0, `${type} must be removed on unmount`)
+  }
+  move()
+  assert.equal(updates.length, 1, 'unmounted panels must not receive position updates')
+})
