@@ -85,29 +85,35 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
   })
 }
 
-test('unmounting a panel removes active drag listeners', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  updates.length = 0
-  t.after(() => {
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
+for (const endReason of ['unmount', 'blur']) {
+  test(`${endReason} removes active panel drag listeners`, (t) => {
+    const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+    const target = new EventTarget()
+    globalThis.window = target
+    updates.length = 0
+    t.after(() => {
+      if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+      else delete globalThis.window
+    })
+    const { headerProps } = usePanelDrag()
+    headerProps.onPointerDown({
+      target: { closest: () => null },
+      pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
+    })
+    const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
+      pointerId: 1, clientX: 25, clientY: 45,
+    }))
+    move()
+    assert.deepEqual(updates, [{ x: 15, y: 25 }])
+    if (endReason === 'unmount') {
+      for (const cleanup of cleanups) cleanup?.()
+    } else {
+      target.dispatchEvent(new Event('blur'))
+    }
+    for (const type of ['pointermove', 'pointerup', 'pointercancel', 'blur']) {
+      assert.equal(getEventListeners(target, type).length, 0, `${type} must be removed after ${endReason}`)
+    }
+    move()
+    assert.equal(updates.length, 1, 'ended drags must not receive position updates')
   })
-  const { headerProps } = usePanelDrag()
-  headerProps.onPointerDown({
-    target: { closest: () => null },
-    pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
-  })
-  const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
-    pointerId: 1, clientX: 25, clientY: 45,
-  }))
-  move()
-  assert.deepEqual(updates, [{ x: 15, y: 25 }])
-  for (const cleanup of cleanups) cleanup?.()
-  for (const type of ['pointermove', 'pointerup', 'pointercancel']) {
-    assert.equal(getEventListeners(target, type).length, 0, `${type} must be removed on unmount`)
-  }
-  move()
-  assert.equal(updates.length, 1, 'unmounted panels must not receive position updates')
-})
+}
