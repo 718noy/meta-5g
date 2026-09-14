@@ -19,6 +19,10 @@ export function usePanelDrag() {
       const move = (ev: PointerEvent) => {
         const d = drag.current
         if (!d || ev.pointerId !== d.pointerId) return
+        if (ev.buttons === 0) {
+          cleanup()
+          return
+        }
         setOff({ x: d.ox + (ev.clientX - d.sx), y: d.oy + (ev.clientY - d.sy) })
       }
       const cleanup = () => {

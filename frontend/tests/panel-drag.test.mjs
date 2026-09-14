@@ -46,7 +46,7 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
       pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
     })
     const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
-      pointerId: 1, clientX: 25, clientY: 45,
+      pointerId: 1, buttons: 1, clientX: 25, clientY: 45,
     }))
     move()
     assert.deepEqual(updates, [{ x: 15, y: 25 }])
@@ -70,7 +70,7 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
       pointerId, button: 0, clientX, clientY: 20, preventDefault() {},
     })
     const dispatch = (type, pointerId) => target.dispatchEvent(Object.assign(new Event(type), {
-      pointerId, clientX: 25, clientY: 45,
+      pointerId, buttons: type === 'pointermove' ? 1 : 0, clientX: 25, clientY: 45,
     }))
     down(1, 10)
     down(2, 100)
@@ -85,7 +85,7 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
   })
 }
 
-for (const endReason of ['unmount', 'blur']) {
+for (const endReason of ['unmount', 'blur', 'missed pointerup']) {
   test(`${endReason} removes active panel drag listeners`, (t) => {
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
     const target = new EventTarget()
@@ -100,15 +100,17 @@ for (const endReason of ['unmount', 'blur']) {
       target: { closest: () => null },
       pointerId: 1, button: 0, clientX: 10, clientY: 20, preventDefault() {},
     })
-    const move = () => target.dispatchEvent(Object.assign(new Event('pointermove'), {
-      pointerId: 1, clientX: 25, clientY: 45,
+    const move = (buttons = 1) => target.dispatchEvent(Object.assign(new Event('pointermove'), {
+      pointerId: 1, buttons, clientX: 25, clientY: 45,
     }))
     move()
     assert.deepEqual(updates, [{ x: 15, y: 25 }])
     if (endReason === 'unmount') {
       for (const cleanup of cleanups) cleanup?.()
-    } else {
+    } else if (endReason === 'blur') {
       target.dispatchEvent(new Event('blur'))
+    } else {
+      move(0)
     }
     for (const type of ['pointermove', 'pointerup', 'pointercancel', 'blur']) {
       assert.equal(getEventListeners(target, type).length, 0, `${type} must be removed after ${endReason}`)
