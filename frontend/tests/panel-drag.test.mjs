@@ -85,7 +85,7 @@ for (const endEvent of ['pointerup', 'pointercancel']) {
   })
 }
 
-for (const endReason of ['unmount', 'blur', 'missed pointerup']) {
+for (const endReason of ['unmount', 'blur', 'missed pointerup', 'primary button release']) {
   test(`${endReason} removes active panel drag listeners`, (t) => {
     const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
     const target = new EventTarget()
@@ -103,14 +103,14 @@ for (const endReason of ['unmount', 'blur', 'missed pointerup']) {
     const move = (buttons = 1) => target.dispatchEvent(Object.assign(new Event('pointermove'), {
       pointerId: 1, buttons, clientX: 25, clientY: 45,
     }))
-    move()
+    move(endReason === 'primary button release' ? 3 : 1)
     assert.deepEqual(updates, [{ x: 15, y: 25 }])
     if (endReason === 'unmount') {
       for (const cleanup of cleanups) cleanup?.()
     } else if (endReason === 'blur') {
       target.dispatchEvent(new Event('blur'))
     } else {
-      move(0)
+      move(endReason === 'primary button release' ? 2 : 0)
     }
     for (const type of ['pointermove', 'pointerup', 'pointercancel', 'blur']) {
       assert.equal(getEventListeners(target, type).length, 0, `${type} must be removed after ${endReason}`)
