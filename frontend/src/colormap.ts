@@ -23,6 +23,7 @@ export const SINR_VIZ_MIN = -10
 export const SINR_VIZ_MAX = 40
 
 export function mapColor(t: number): [number, number, number, number] {
+  if (Number.isNaN(t)) return [0, 0, 0, 0]
   const x = Math.min(Math.max(t, 0), 1)
   const first = STOPS[0]
   const last = STOPS[STOPS.length - 1]

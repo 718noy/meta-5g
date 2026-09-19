@@ -6,6 +6,15 @@ const { cssGradient, mapColor, STOPS } = await import('../src/colormap.ts')
 test('mapColor clamps samples outside the declared color stops', () => {
   assert.deepEqual(mapColor(-1), STOPS[0].rgba)
   assert.deepEqual(mapColor(2), STOPS.at(-1).rgba)
+  assert.deepEqual(mapColor(-Infinity), STOPS[0].rgba)
+  assert.deepEqual(mapColor(Infinity), STOPS.at(-1).rgba)
+})
+
+test('mapColor does not display invalid samples as a strong signal', () => {
+  assert.deepEqual(mapColor(NaN), [0, 0, 0, 0])
+  mapColor(0.5).forEach((channel, i) => {
+    assert.ok(Math.abs(channel - STOPS[3].rgba[i]) < 1e-12)
+  })
 })
 
 test('editing an endpoint sample preserves later colors and the legend', () => {
