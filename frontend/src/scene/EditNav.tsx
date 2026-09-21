@@ -19,11 +19,16 @@ export function EditNav() {
     const up = (e: KeyboardEvent) => {
       keys.current[e.code] = false
     }
+    const blur = () => {
+      keys.current = {}
+    }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
+    window.addEventListener('blur', blur)
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', blur)
     }
   }, [])
 
