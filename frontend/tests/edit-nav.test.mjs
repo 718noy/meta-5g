@@ -48,7 +48,7 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
   const target = new EventTarget()
   globalThis.window = target
   t.after(() => {
-    for (const cleanup of runtime.cleanups) cleanup?.()
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else delete globalThis.window
   })
@@ -72,8 +72,41 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
   press()
   runtime.frame({}, 1 / 60)
   assert.notDeepEqual(camera.position.toArray(), moved)
-  for (const cleanup of runtime.cleanups) cleanup?.()
+  for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
   for (const type of ['keydown', 'keyup', 'blur']) {
     assert.equal(getEventListeners(target, type).length, 0)
   }
+})
+
+test('modified shortcuts do not move the camera or orbit target', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  t.after(() => {
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const initial = camera.position.toArray()
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey']) {
+    target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyS', [modifier]: true }))
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), initial, modifier)
+    assert.deepEqual(controls.target.toArray(), [0, 0, 0], modifier)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code: 'KeyS' }))
+  }
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyS' }))
+  runtime.frame({}, 1 / 60)
+  assert.notDeepEqual(camera.position.toArray(), initial)
+  const normalStep = camera.position.distanceTo(new THREE.Vector3(...initial))
+  const beforeBoost = camera.position.clone()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'ShiftLeft', shiftKey: true }))
+  runtime.frame({}, 1 / 60)
+  assert.ok(Math.abs(camera.position.distanceTo(beforeBoost) - normalStep * 2.5) < 1e-10)
 })

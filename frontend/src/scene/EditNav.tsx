@@ -12,6 +12,7 @@ export function EditNav() {
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
+      if (e.ctrlKey || e.metaKey || e.altKey) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
       keys.current[e.code] = true
