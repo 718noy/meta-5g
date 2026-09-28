@@ -113,3 +113,41 @@ test('handled keys and modified shortcuts do not move the camera or orbit target
   runtime.frame({}, 1 / 60)
   assert.ok(Math.abs(camera.position.distanceTo(beforeBoost) - normalStep * 2.5) < 1e-10)
 })
+
+test('typing in editable elements does not move the camera', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  t.after(() => {
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const initial = camera.position.toArray()
+  for (const element of [
+    { tagName: 'INPUT' },
+    { tagName: 'SELECT' },
+    { tagName: 'TEXTAREA' },
+    { tagName: 'DIV', isContentEditable: true },
+    { tagName: 'SPAN', isContentEditable: true },
+  ]) {
+    const event = Object.assign(new Event('keydown'), { code: 'KeyW' })
+    Object.defineProperty(event, 'target', { value: element })
+    target.dispatchEvent(event)
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), initial, element.tagName)
+    assert.deepEqual(controls.target.toArray(), [0, 0, 0], element.tagName)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code: 'KeyW' }))
+  }
+  const event = Object.assign(new Event('keydown'), { code: 'KeyW' })
+  Object.defineProperty(event, 'target', { value: { tagName: 'DIV', isContentEditable: false } })
+  target.dispatchEvent(event)
+  runtime.frame({}, 1 / 60)
+  assert.notDeepEqual(camera.position.toArray(), initial)
+})
