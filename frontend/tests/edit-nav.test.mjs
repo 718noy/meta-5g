@@ -73,7 +73,7 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
   runtime.frame({}, 1 / 60)
   assert.notDeepEqual(camera.position.toArray(), moved)
   for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-  for (const type of ['keydown', 'keyup', 'blur']) {
+  for (const type of ['keydown', 'keyup', 'blur', 'focusin']) {
     assert.equal(getEventListeners(target, type).length, 0)
   }
 })
@@ -150,4 +150,49 @@ test('typing in editable elements does not move the camera', (t) => {
   target.dispatchEvent(event)
   runtime.frame({}, 1 / 60)
   assert.notDeepEqual(camera.position.toArray(), initial)
+})
+
+test('focusing an editable element stops held movement keys', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  t.after(() => {
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const press = () => target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  const focus = element => {
+    const event = new Event('focusin')
+    Object.defineProperty(event, 'target', { value: element })
+    target.dispatchEvent(event)
+  }
+  const initial = camera.position.toArray()
+  press()
+  focus({ tagName: 'BUTTON' })
+  runtime.frame({}, 1 / 60)
+  assert.notDeepEqual(camera.position.toArray(), initial)
+  for (const element of [
+    { tagName: 'INPUT' },
+    { tagName: 'SELECT' },
+    { tagName: 'TEXTAREA' },
+    { tagName: 'SPAN', isContentEditable: true },
+  ]) {
+    const beforePress = camera.position.toArray()
+    press()
+    runtime.frame({}, 1 / 60)
+    const moved = camera.position.toArray()
+    const movedTarget = controls.target.toArray()
+    assert.notDeepEqual(moved, beforePress)
+    focus(element)
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), moved, element.tagName)
+    assert.deepEqual(controls.target.toArray(), movedTarget, element.tagName)
+  }
 })

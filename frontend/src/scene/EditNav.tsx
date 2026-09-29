@@ -24,13 +24,20 @@ export function EditNav() {
     const blur = () => {
       keys.current = {}
     }
+    const focus = (e: FocusEvent) => {
+      const target = e.target as HTMLElement | null
+      const tag = target?.tagName
+      if (target?.isContentEditable || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') blur()
+    }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
     window.addEventListener('blur', blur)
+    window.addEventListener('focusin', focus)
     return () => {
       window.removeEventListener('keydown', down)
       window.removeEventListener('keyup', up)
       window.removeEventListener('blur', blur)
+      window.removeEventListener('focusin', focus)
     }
   }, [])
 
