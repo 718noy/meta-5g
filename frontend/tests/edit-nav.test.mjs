@@ -78,7 +78,7 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
   }
 })
 
-test('handled keys and modified shortcuts do not move the camera or orbit target', (t) => {
+test('handled keys, IME composition, and modified shortcuts do not move the camera or orbit target', (t) => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const target = new EventTarget()
   globalThis.window = target
@@ -94,7 +94,7 @@ test('handled keys and modified shortcuts do not move the camera or orbit target
   runtime.setScene({ camera, controls })
   EditNav()
   const initial = camera.position.toArray()
-  for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'defaultPrevented']) {
+  for (const modifier of ['ctrlKey', 'metaKey', 'altKey', 'defaultPrevented', 'isComposing']) {
     const event = Object.assign(new Event('keydown', { cancelable: true }), { code: 'KeyS' })
     if (modifier === 'defaultPrevented') event.preventDefault()
     else event[modifier] = true

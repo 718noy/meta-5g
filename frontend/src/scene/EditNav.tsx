@@ -12,7 +12,7 @@ export function EditNav() {
 
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
-      if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return
+      if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return
       const target = e.target as HTMLElement | null
       const tag = target?.tagName
       if (target?.isContentEditable || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
