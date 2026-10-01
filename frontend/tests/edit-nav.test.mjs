@@ -152,6 +152,40 @@ test('typing in editable elements does not move the camera', (t) => {
   assert.notDeepEqual(camera.position.toArray(), initial)
 })
 
+test('diagonal movement preserves speed and the camera offset from the orbit target', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  t.after(() => {
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const initial = camera.position.clone()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  runtime.frame({}, 1 / 60)
+  const straightStep = camera.position.distanceTo(initial)
+  assert.ok(straightStep > 0)
+  const beforeDiagonal = camera.position.clone()
+  const beforeTarget = controls.target.clone()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyD' }))
+  runtime.frame({}, 1 / 60)
+  const cameraDelta = camera.position.clone().sub(beforeDiagonal)
+  const targetDelta = controls.target.clone().sub(beforeTarget)
+  assert.ok(cameraDelta.x > 0)
+  assert.ok(cameraDelta.z < 0)
+  assert.equal(cameraDelta.y, 0)
+  assert.ok(Math.abs(cameraDelta.length() - straightStep) < 1e-10)
+  assert.ok(cameraDelta.distanceTo(targetDelta) < 1e-10)
+  assert.ok(camera.position.clone().sub(controls.target).distanceTo(initial) < 1e-10)
+})
+
 test('focusing an editable element stops held movement keys', (t) => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const target = new EventTarget()
