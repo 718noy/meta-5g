@@ -186,6 +186,34 @@ test('diagonal movement preserves speed and the camera offset from the orbit tar
   assert.ok(camera.position.clone().sub(controls.target).distanceTo(initial) < 1e-10)
 })
 
+test('long frames cap keyboard camera movement without inflating shorter steps', (t) => {
+  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
+  const target = new EventTarget()
+  globalThis.window = target
+  t.after(() => {
+    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
+    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
+    else delete globalThis.window
+  })
+  const camera = new THREE.PerspectiveCamera()
+  const initial = new THREE.Vector3(0, 5, 10)
+  camera.position.copy(initial)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  for (const [dt, distance] of [[0, 0], [0.01, 0.08], [0.05, 0.4], [0.051, 0.4], [1, 0.4]]) {
+    camera.position.copy(initial)
+    controls.target.set(0, 0, 0)
+    runtime.frame({}, dt)
+    const expectedDelta = new THREE.Vector3(0, 0, -distance)
+    const cameraDelta = camera.position.clone().sub(initial)
+    assert.ok(cameraDelta.distanceTo(expectedDelta) < 1e-10, `camera dt=${dt}`)
+    assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, `target dt=${dt}`)
+  }
+})
+
 test('focusing an editable element stops held movement keys', (t) => {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const target = new EventTarget()
