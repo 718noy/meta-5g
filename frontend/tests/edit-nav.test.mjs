@@ -43,7 +43,7 @@ try {
 }
 const runtime = await import(stubUrl)
 
-test('losing focus stops keyboard camera movement until a new key press', (t) => {
+function createTestWindow(t) {
   const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
   const target = new EventTarget()
   globalThis.window = target
@@ -52,6 +52,11 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
     if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
     else delete globalThis.window
   })
+  return target
+}
+
+test('losing focus stops keyboard camera movement until a new key press', (t) => {
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
   camera.lookAt(0, 0, 0)
@@ -79,14 +84,7 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
 })
 
 test('handled keys, IME composition, and modified shortcuts do not move the camera or orbit target', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  t.after(() => {
-    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
-  })
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
   camera.lookAt(0, 0, 0)
@@ -115,14 +113,7 @@ test('handled keys, IME composition, and modified shortcuts do not move the came
 })
 
 test('typing in editable elements does not move the camera', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  t.after(() => {
-    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
-  })
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
   camera.lookAt(0, 0, 0)
@@ -153,14 +144,7 @@ test('typing in editable elements does not move the camera', (t) => {
 })
 
 test('diagonal movement preserves speed and the camera offset from the orbit target', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  t.after(() => {
-    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
-  })
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
   camera.lookAt(0, 0, 0)
@@ -187,14 +171,7 @@ test('diagonal movement preserves speed and the camera offset from the orbit tar
 })
 
 test('long frames cap keyboard camera movement without inflating shorter steps', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  t.after(() => {
-    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
-  })
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   const initial = new THREE.Vector3(0, 5, 10)
   camera.position.copy(initial)
@@ -215,14 +192,7 @@ test('long frames cap keyboard camera movement without inflating shorter steps',
 })
 
 test('focusing an editable element stops held movement keys', (t) => {
-  const originalWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
-  const target = new EventTarget()
-  globalThis.window = target
-  t.after(() => {
-    for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
-    if (originalWindow) Object.defineProperty(globalThis, 'window', originalWindow)
-    else delete globalThis.window
-  })
+  const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
   camera.lookAt(0, 0, 0)
