@@ -170,6 +170,43 @@ test('diagonal movement preserves speed and the camera offset from the orbit tar
   assert.ok(camera.position.clone().sub(controls.target).distanceTo(initial) < 1e-10)
 })
 
+test('opposing movement keys cancel until one is released', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  const initial = new THREE.Vector3(0, 5, 10)
+  camera.position.copy(initial)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  for (const [held, released, direction] of [
+    ['KeyW', 'KeyS', [0, 0, -1]],
+    ['KeyA', 'KeyD', [-1, 0, 0]],
+    ['ArrowUp', 'ArrowDown', [0, 0, -1]],
+    ['ArrowLeft', 'ArrowRight', [-1, 0, 0]],
+  ]) {
+    camera.position.copy(initial)
+    controls.target.set(0, 0, 0)
+    for (const code of [held, released]) {
+      target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+    }
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), initial.toArray(), held)
+    assert.deepEqual(controls.target.toArray(), [0, 0, 0], held)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code: released }))
+    runtime.frame({}, 1 / 60)
+    const expectedDelta = new THREE.Vector3(...direction).multiplyScalar(8 / 60)
+    assert.ok(camera.position.clone().sub(initial).distanceTo(expectedDelta) < 1e-10, held)
+    assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, held)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code: held }))
+    const stopped = camera.position.toArray()
+    const stoppedTarget = controls.target.toArray()
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), stopped, held)
+    assert.deepEqual(controls.target.toArray(), stoppedTarget, held)
+  }
+})
+
 test('long frames cap keyboard camera movement without inflating shorter steps', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
