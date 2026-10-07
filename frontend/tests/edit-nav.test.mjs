@@ -112,6 +112,35 @@ test('handled keys, IME composition, and modified shortcuts do not move the came
   assert.ok(Math.abs(camera.position.distanceTo(beforeBoost) - normalStep * 2.5) < 1e-10)
 })
 
+test('camera boost remains active until both shift keys are released', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  for (const [type, code, multiplier] of [
+    ['keydown', 'ShiftLeft', 2.5],
+    ['keydown', 'ShiftRight', 2.5],
+    ['keyup', 'ShiftLeft', 2.5],
+    ['keyup', 'ShiftRight', 1],
+    ['keydown', 'ShiftRight', 2.5],
+    ['keydown', 'ShiftLeft', 2.5],
+    ['keyup', 'ShiftRight', 2.5],
+    ['keyup', 'ShiftLeft', 1],
+  ]) {
+    target.dispatchEvent(Object.assign(new Event(type), { code }))
+    const beforeCamera = camera.position.clone()
+    const beforeTarget = controls.target.clone()
+    runtime.frame({}, 1 / 60)
+    const expectedDelta = new THREE.Vector3(0, 0, -8 / 60 * multiplier)
+    assert.ok(camera.position.clone().sub(beforeCamera).distanceTo(expectedDelta) < 1e-10, `${type} ${code}`)
+    assert.ok(controls.target.clone().sub(beforeTarget).distanceTo(expectedDelta) < 1e-10, `${type} ${code}`)
+  }
+})
+
 test('typing in editable elements does not move the camera', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
