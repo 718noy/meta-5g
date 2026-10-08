@@ -16,7 +16,7 @@ const stubUrl = `data:text/javascript,${encodeURIComponent(`
   export const useFrame = callback => { frame = callback }
   export const useEffect = effect => { cleanups.push(effect()) }
   export const useRef = current => ({ current })
-  export const useStore = { getState: () => ({ mode: 'edit' }) }
+  export const useStore = { getState: () => ({ mode: scene.mode ?? 'edit' }) }
 `)}`
 const hooks = registerHooks({
   resolve(specifier, context, nextResolve) {
@@ -54,6 +54,31 @@ function createTestWindow(t) {
   })
   return target
 }
+
+test('switching to walk mode stops edit camera movement with a key held', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  let updates = 0
+  const controls = { target: new THREE.Vector3(), update() { updates++ } }
+  const scene = { camera, controls, mode: 'edit' }
+  runtime.setScene(scene)
+  EditNav()
+  const initial = camera.position.toArray()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  runtime.frame({}, 1 / 60)
+  assert.notDeepEqual(camera.position.toArray(), initial)
+  assert.notDeepEqual(controls.target.toArray(), [0, 0, 0])
+  assert.equal(updates, 1)
+  const moved = camera.position.toArray()
+  const movedTarget = controls.target.toArray()
+  scene.mode = 'walk'
+  runtime.frame({}, 1 / 60)
+  assert.deepEqual(camera.position.toArray(), moved)
+  assert.deepEqual(controls.target.toArray(), movedTarget)
+  assert.equal(updates, 1)
+})
 
 test('losing focus stops keyboard camera movement until a new key press', (t) => {
   const target = createTestWindow(t)
