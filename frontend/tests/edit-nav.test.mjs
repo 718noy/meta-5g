@@ -261,6 +261,26 @@ test('opposing movement keys cancel until one is released', (t) => {
   }
 })
 
+test('camera movement speed scales with distance from the orbit target', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  const origin = new THREE.Vector3(3, 2, -7)
+  const controls = { target: origin.clone(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  for (const [distance, speed] of [[5, 8], [20, 12], [40, 24]]) {
+    controls.target.copy(origin)
+    camera.position.copy(origin).add(new THREE.Vector3(0, 0, distance))
+    camera.lookAt(controls.target)
+    const beforeCamera = camera.position.clone()
+    runtime.frame({}, 1 / 60)
+    const expectedDelta = new THREE.Vector3(0, 0, -speed / 60)
+    assert.ok(camera.position.clone().sub(beforeCamera).distanceTo(expectedDelta) < 1e-10, `camera distance=${distance}`)
+    assert.ok(controls.target.clone().sub(origin).distanceTo(expectedDelta) < 1e-10, `target distance=${distance}`)
+  }
+})
+
 test('long frames cap keyboard camera movement without inflating shorter steps', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
