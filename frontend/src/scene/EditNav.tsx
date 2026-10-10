@@ -5,6 +5,12 @@ import { useEffect, useRef } from 'react'
 import * as THREE from 'three'
 import { useStore } from '../store'
 
+function isEditableTarget(target: EventTarget | null) {
+  const element = target as HTMLElement | null
+  const tag = element?.tagName
+  return element?.isContentEditable || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA'
+}
+
 export function EditNav() {
   const camera = useThree((s) => s.camera)
   const controls = useThree((s) => s.controls) as { target: THREE.Vector3; update: () => void } | null
@@ -13,9 +19,7 @@ export function EditNav() {
   useEffect(() => {
     const down = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.metaKey || e.altKey) return
-      const target = e.target as HTMLElement | null
-      const tag = target?.tagName
-      if (target?.isContentEditable || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return
+      if (isEditableTarget(e.target)) return
       keys.current[e.code] = true
     }
     const up = (e: KeyboardEvent) => {
@@ -25,9 +29,7 @@ export function EditNav() {
       keys.current = {}
     }
     const focus = (e: FocusEvent) => {
-      const target = e.target as HTMLElement | null
-      const tag = target?.tagName
-      if (target?.isContentEditable || tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') blur()
+      if (isEditableTarget(e.target)) blur()
     }
     window.addEventListener('keydown', down)
     window.addEventListener('keyup', up)
