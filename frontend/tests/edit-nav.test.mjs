@@ -55,6 +55,41 @@ function createTestWindow(t) {
   return target
 }
 
+test('idle frames skip camera direction calculations', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const direction = t.mock.method(camera, 'getWorldDirection')
+  let updates = 0
+  const controls = { target: new THREE.Vector3(), update() { updates++ } }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const initial = camera.position.toArray()
+  for (const code of [null, 'ShiftLeft', 'ShiftRight', 'KeyE']) {
+    if (code) target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+    runtime.frame({}, 1 / 60)
+    assert.equal(direction.mock.callCount(), 0, code)
+    assert.equal(updates, 0, code)
+    assert.deepEqual(camera.position.toArray(), initial, code)
+    assert.deepEqual(controls.target.toArray(), [0, 0, 0], code)
+    if (code) target.dispatchEvent(Object.assign(new Event('keyup'), { code }))
+  }
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  runtime.frame({}, 1 / 60)
+  assert.equal(direction.mock.callCount(), 1)
+  assert.equal(updates, 1)
+  assert.notDeepEqual(camera.position.toArray(), initial)
+  const moved = camera.position.toArray()
+  const movedTarget = controls.target.toArray()
+  target.dispatchEvent(Object.assign(new Event('keyup'), { code: 'KeyW' }))
+  runtime.frame({}, 1 / 60)
+  assert.equal(direction.mock.callCount(), 1)
+  assert.equal(updates, 1)
+  assert.deepEqual(camera.position.toArray(), moved)
+  assert.deepEqual(controls.target.toArray(), movedTarget)
+})
+
 test('switching to walk mode stops edit camera movement with a key held', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()

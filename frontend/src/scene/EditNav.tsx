@@ -46,6 +46,8 @@ export function EditNav() {
   useFrame((_, dt) => {
     if (useStore.getState().mode !== 'edit' || !controls) return
     const k = keys.current
+    if (!(k['KeyW'] || k['ArrowUp'] || k['KeyS'] || k['ArrowDown'] ||
+      k['KeyD'] || k['ArrowRight'] || k['KeyA'] || k['ArrowLeft'])) return
     const dir = new THREE.Vector3()
     const fwd = new THREE.Vector3()
     camera.getWorldDirection(fwd)
