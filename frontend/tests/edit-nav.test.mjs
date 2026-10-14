@@ -90,6 +90,36 @@ test('idle frames skip camera direction calculations', (t) => {
   assert.deepEqual(controls.target.toArray(), movedTarget)
 })
 
+test('WASD and arrow keys move the camera and orbit target in matching directions', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  const initial = new THREE.Vector3(0, 5, 10)
+  camera.position.copy(initial)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  for (const [code, direction] of [
+    ['KeyW', [0, 0, -1]],
+    ['ArrowUp', [0, 0, -1]],
+    ['KeyS', [0, 0, 1]],
+    ['ArrowDown', [0, 0, 1]],
+    ['KeyA', [-1, 0, 0]],
+    ['ArrowLeft', [-1, 0, 0]],
+    ['KeyD', [1, 0, 0]],
+    ['ArrowRight', [1, 0, 0]],
+  ]) {
+    camera.position.copy(initial)
+    controls.target.set(0, 0, 0)
+    target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+    runtime.frame({}, 1 / 60)
+    const expectedDelta = new THREE.Vector3(...direction).multiplyScalar(8 / 60)
+    assert.ok(camera.position.clone().sub(initial).distanceTo(expectedDelta) < 1e-10, code)
+    assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, code)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code }))
+  }
+})
+
 test('switching to walk mode stops edit camera movement with a key held', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
