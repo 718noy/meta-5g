@@ -120,6 +120,31 @@ test('WASD and arrow keys move the camera and orbit target in matching direction
   }
 })
 
+test('movement follows the rotated camera heading without changing height', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  const initial = new THREE.Vector3(10, 5, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  for (const [code, direction] of [
+    ['KeyW', [-1, 0, 0]],
+    ['KeyS', [1, 0, 0]],
+    ['KeyA', [0, 0, 1]],
+    ['KeyD', [0, 0, -1]],
+  ]) {
+    camera.position.copy(initial)
+    controls.target.set(0, 0, 0)
+    camera.lookAt(controls.target)
+    target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+    runtime.frame({}, 1 / 60)
+    const expectedDelta = new THREE.Vector3(...direction).multiplyScalar(8 / 60)
+    assert.ok(camera.position.clone().sub(initial).distanceTo(expectedDelta) < 1e-10, code)
+    assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, code)
+    target.dispatchEvent(Object.assign(new Event('keyup'), { code }))
+  }
+})
+
 test('switching to walk mode stops edit camera movement with a key held', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
