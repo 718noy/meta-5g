@@ -54,7 +54,7 @@ export function EditNav() {
     fwd.y = 0
     if (fwd.lengthSq() < 1e-6) return
     fwd.normalize()
-    const right = new THREE.Vector3().crossVectors(fwd, new THREE.Vector3(0, 1, 0))
+    const right = new THREE.Vector3(-fwd.z, 0, fwd.x)
 
     if (k['KeyW'] || k['ArrowUp']) dir.add(fwd)
     if (k['KeyS'] || k['ArrowDown']) dir.sub(fwd)
