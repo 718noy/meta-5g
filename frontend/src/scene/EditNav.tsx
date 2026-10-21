@@ -46,8 +46,9 @@ export function EditNav() {
   useFrame((_, dt) => {
     if (useStore.getState().mode !== 'edit' || !controls) return
     const k = keys.current
-    if (!(k['KeyW'] || k['ArrowUp'] || k['KeyS'] || k['ArrowDown'] ||
-      k['KeyD'] || k['ArrowRight'] || k['KeyA'] || k['ArrowLeft'])) return
+    const forward = Number(Boolean(k['KeyW'] || k['ArrowUp'])) - Number(Boolean(k['KeyS'] || k['ArrowDown']))
+    const sideways = Number(Boolean(k['KeyD'] || k['ArrowRight'])) - Number(Boolean(k['KeyA'] || k['ArrowLeft']))
+    if (forward === 0 && sideways === 0) return
     const dir = new THREE.Vector3()
     const fwd = new THREE.Vector3()
     camera.getWorldDirection(fwd)
@@ -56,10 +57,7 @@ export function EditNav() {
     fwd.normalize()
     const right = new THREE.Vector3(-fwd.z, 0, fwd.x)
 
-    if (k['KeyW'] || k['ArrowUp']) dir.add(fwd)
-    if (k['KeyS'] || k['ArrowDown']) dir.sub(fwd)
-    if (k['KeyD'] || k['ArrowRight']) dir.add(right)
-    if (k['KeyA'] || k['ArrowLeft']) dir.sub(right)
+    dir.addScaledVector(fwd, forward).addScaledVector(right, sideways)
     if (dir.lengthSq() === 0) return
 
     dir.normalize()

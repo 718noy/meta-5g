@@ -317,6 +317,7 @@ test('diagonal movement preserves speed and the camera offset from the orbit tar
 test('opposing movement keys cancel until one is released', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
+  const readDirection = t.mock.method(camera, 'getWorldDirection')
   const initial = new THREE.Vector3(0, 5, 10)
   camera.position.copy(initial)
   camera.lookAt(0, 0, 0)
@@ -328,17 +329,22 @@ test('opposing movement keys cancel until one is released', (t) => {
     ['KeyA', 'KeyD', [-1, 0, 0]],
     ['ArrowUp', 'ArrowDown', [0, 0, -1]],
     ['ArrowLeft', 'ArrowRight', [-1, 0, 0]],
+    ['KeyW', 'ArrowDown', [0, 0, -1]],
+    ['KeyD', 'ArrowLeft', [1, 0, 0]],
   ]) {
     camera.position.copy(initial)
     controls.target.set(0, 0, 0)
+    const directionCalls = readDirection.mock.callCount()
     for (const code of [held, released]) {
       target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
     }
     runtime.frame({}, 1 / 60)
     assert.deepEqual(camera.position.toArray(), initial.toArray(), held)
     assert.deepEqual(controls.target.toArray(), [0, 0, 0], held)
+    assert.equal(readDirection.mock.callCount(), directionCalls, held)
     target.dispatchEvent(Object.assign(new Event('keyup'), { code: released }))
     runtime.frame({}, 1 / 60)
+    assert.equal(readDirection.mock.callCount(), directionCalls + 1, held)
     const expectedDelta = new THREE.Vector3(...direction).multiplyScalar(8 / 60)
     assert.ok(camera.position.clone().sub(initial).distanceTo(expectedDelta) < 1e-10, held)
     assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, held)
@@ -348,6 +354,7 @@ test('opposing movement keys cancel until one is released', (t) => {
     runtime.frame({}, 1 / 60)
     assert.deepEqual(camera.position.toArray(), stopped, held)
     assert.deepEqual(controls.target.toArray(), stoppedTarget, held)
+    assert.equal(readDirection.mock.callCount(), directionCalls + 1, held)
   }
 })
 
