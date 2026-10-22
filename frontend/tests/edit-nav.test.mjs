@@ -120,6 +120,41 @@ test('WASD and arrow keys move the camera and orbit target in matching direction
   }
 })
 
+test('matching movement keys stay active until both aliases are released', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const controls = { target: new THREE.Vector3(), update() {} }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  const step = (expectedDelta, label) => {
+    const beforeCamera = camera.position.clone()
+    const beforeTarget = controls.target.clone()
+    runtime.frame({}, 1 / 60)
+    assert.ok(camera.position.clone().sub(beforeCamera).distanceTo(expectedDelta) < 1e-10, label)
+    assert.ok(controls.target.clone().sub(beforeTarget).distanceTo(expectedDelta) < 1e-10, label)
+  }
+  for (const [letter, arrow, direction] of [
+    ['KeyW', 'ArrowUp', [0, 0, -1]],
+    ['KeyS', 'ArrowDown', [0, 0, 1]],
+    ['KeyA', 'ArrowLeft', [-1, 0, 0]],
+    ['KeyD', 'ArrowRight', [1, 0, 0]],
+  ]) {
+    const expectedDelta = new THREE.Vector3(...direction).multiplyScalar(8 / 60)
+    for (const [first, second] of [[letter, arrow], [arrow, letter]]) {
+      for (const code of [first, second]) {
+        target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+      }
+      step(expectedDelta, `${first}+${second}`)
+      target.dispatchEvent(Object.assign(new Event('keyup'), { code: first }))
+      step(expectedDelta, second)
+      target.dispatchEvent(Object.assign(new Event('keyup'), { code: second }))
+      step(new THREE.Vector3(), `released ${second}`)
+    }
+  }
+})
+
 test('movement follows the rotated camera heading without changing height', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
