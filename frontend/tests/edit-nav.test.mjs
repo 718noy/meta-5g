@@ -180,6 +180,31 @@ test('movement follows the rotated camera heading without changing height', (t) 
   }
 })
 
+test('near-vertical views pause movement until the camera tilts back', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  const initial = new THREE.Vector3(0, 10, 0)
+  camera.position.copy(initial)
+  let updates = 0
+  const controls = { target: new THREE.Vector3(), update() { updates++ } }
+  runtime.setScene({ camera, controls })
+  EditNav()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  for (const y of [0, 20]) {
+    camera.lookAt(0, y, 0)
+    runtime.frame({}, 1 / 60)
+    assert.deepEqual(camera.position.toArray(), initial.toArray(), `lookAt y=${y}`)
+    assert.deepEqual(controls.target.toArray(), [0, 0, 0], `lookAt y=${y}`)
+    assert.equal(updates, 0, `lookAt y=${y}`)
+  }
+  camera.lookAt(0, 0, -5)
+  runtime.frame({}, 1 / 60)
+  const expectedDelta = new THREE.Vector3(0, 0, -8 / 60)
+  assert.ok(camera.position.clone().sub(initial).distanceTo(expectedDelta) < 1e-10)
+  assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10)
+  assert.equal(updates, 1)
+})
+
 test('switching to walk mode stops edit camera movement with a key held', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
