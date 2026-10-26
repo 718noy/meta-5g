@@ -44,7 +44,7 @@ export function EditNav() {
   }, [])
 
   useFrame((_, dt) => {
-    if (useStore.getState().mode !== 'edit' || !controls) return
+    if (dt === 0 || useStore.getState().mode !== 'edit' || !controls) return
     const k = keys.current
     const forward = Number(Boolean(k['KeyW'] || k['ArrowUp'])) - Number(Boolean(k['KeyS'] || k['ArrowDown']))
     const sideways = Number(Boolean(k['KeyD'] || k['ArrowRight'])) - Number(Boolean(k['KeyA'] || k['ArrowLeft']))

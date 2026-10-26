@@ -55,7 +55,7 @@ function createTestWindow(t) {
   return target
 }
 
-test('idle frames skip camera direction calculations', (t) => {
+test('idle and zero-time frames skip camera direction calculations', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
@@ -76,6 +76,11 @@ test('idle frames skip camera direction calculations', (t) => {
     if (code) target.dispatchEvent(Object.assign(new Event('keyup'), { code }))
   }
   target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  runtime.frame({}, 0)
+  assert.equal(direction.mock.callCount(), 0)
+  assert.equal(updates, 0)
+  assert.deepEqual(camera.position.toArray(), initial)
+  assert.deepEqual(controls.target.toArray(), [0, 0, 0])
   runtime.frame({}, 1 / 60)
   assert.equal(direction.mock.callCount(), 1)
   assert.equal(updates, 1)
