@@ -95,6 +95,21 @@ test('idle and zero-time frames skip camera direction calculations', (t) => {
   assert.deepEqual(controls.target.toArray(), movedTarget)
 })
 
+test('missing orbit controls skip camera movement safely', (t) => {
+  const target = createTestWindow(t)
+  const camera = new THREE.PerspectiveCamera()
+  camera.position.set(0, 5, 10)
+  camera.lookAt(0, 0, 0)
+  const direction = t.mock.method(camera, 'getWorldDirection')
+  runtime.setScene({ camera, controls: null })
+  EditNav()
+  const initial = camera.position.toArray()
+  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
+  assert.doesNotThrow(() => runtime.frame({}, 1 / 60))
+  assert.equal(direction.mock.callCount(), 0)
+  assert.deepEqual(camera.position.toArray(), initial)
+})
+
 test('WASD and arrow keys move the camera and orbit target in matching directions', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
