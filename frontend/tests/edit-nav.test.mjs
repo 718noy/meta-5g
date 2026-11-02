@@ -250,7 +250,7 @@ test('switching to walk mode stops edit camera movement with a key held', (t) =>
   assert.equal(updates, 1)
 })
 
-test('losing focus stops keyboard camera movement until a new key press', (t) => {
+test('losing focus clears movement and boost keys', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
@@ -260,18 +260,23 @@ test('losing focus stops keyboard camera movement until a new key press', (t) =>
   EditNav()
   const press = () => target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyW' }))
   const initial = camera.position.toArray()
+  for (const code of ['ShiftLeft', 'ShiftRight']) {
+    target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+  }
   press()
   runtime.frame({}, 1 / 60)
   const moved = camera.position.toArray()
   const movedTarget = controls.target.toArray()
-  assert.notDeepEqual(moved, initial)
+  assert.ok(Math.abs(camera.position.distanceTo(new THREE.Vector3(...initial)) - 20 / 60) < 1e-10)
+  assert.ok(Math.abs(controls.target.length() - 20 / 60) < 1e-10)
   target.dispatchEvent(new Event('blur'))
   runtime.frame({}, 1 / 60)
   assert.deepEqual(camera.position.toArray(), moved)
   assert.deepEqual(controls.target.toArray(), movedTarget)
   press()
   runtime.frame({}, 1 / 60)
-  assert.notDeepEqual(camera.position.toArray(), moved)
+  assert.ok(Math.abs(camera.position.distanceTo(new THREE.Vector3(...moved)) - 8 / 60) < 1e-10)
+  assert.ok(Math.abs(controls.target.distanceTo(new THREE.Vector3(...movedTarget)) - 8 / 60) < 1e-10)
   for (const cleanup of runtime.cleanups.splice(0)) cleanup?.()
   for (const type of ['keydown', 'keyup', 'blur', 'focusin']) {
     assert.equal(getEventListeners(target, type).length, 0)
