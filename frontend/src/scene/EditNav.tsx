@@ -50,14 +50,13 @@ export function EditNav() {
     const sideways = Number(Boolean(k['KeyD'] || k['ArrowRight'])) - Number(Boolean(k['KeyA'] || k['ArrowLeft']))
     if (forward === 0 && sideways === 0) return
     const dir = new THREE.Vector3()
-    const fwd = new THREE.Vector3()
-    camera.getWorldDirection(fwd)
-    fwd.y = 0
-    if (fwd.lengthSq() < 1e-6) return
-    fwd.normalize()
-    const right = new THREE.Vector3(-fwd.z, 0, fwd.x)
+    camera.getWorldDirection(dir)
+    dir.y = 0
+    if (dir.lengthSq() < 1e-6) return
+    dir.normalize()
+    const right = new THREE.Vector3(-dir.z, 0, dir.x)
 
-    dir.addScaledVector(fwd, forward).addScaledVector(right, sideways)
+    dir.multiplyScalar(forward).addScaledVector(right, sideways)
     if (dir.lengthSq() === 0) return
 
     dir.normalize()
