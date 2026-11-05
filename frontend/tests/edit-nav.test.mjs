@@ -372,7 +372,7 @@ test('typing in editable elements does not move the camera', (t) => {
   assert.notDeepEqual(camera.position.toArray(), initial)
 })
 
-test('diagonal movement preserves speed and the camera offset from the orbit target', (t) => {
+test('all diagonal movements preserve speed and the camera offset from the orbit target', (t) => {
   const target = createTestWindow(t)
   const camera = new THREE.PerspectiveCamera()
   camera.position.set(0, 5, 10)
@@ -385,18 +385,30 @@ test('diagonal movement preserves speed and the camera offset from the orbit tar
   runtime.frame({}, 1 / 60)
   const straightStep = camera.position.distanceTo(initial)
   assert.ok(straightStep > 0)
-  const beforeDiagonal = camera.position.clone()
-  const beforeTarget = controls.target.clone()
-  target.dispatchEvent(Object.assign(new Event('keydown'), { code: 'KeyD' }))
-  runtime.frame({}, 1 / 60)
-  const cameraDelta = camera.position.clone().sub(beforeDiagonal)
-  const targetDelta = controls.target.clone().sub(beforeTarget)
-  assert.ok(cameraDelta.x > 0)
-  assert.ok(cameraDelta.z < 0)
-  assert.equal(cameraDelta.y, 0)
-  assert.ok(Math.abs(cameraDelta.length() - straightStep) < 1e-10)
-  assert.ok(cameraDelta.distanceTo(targetDelta) < 1e-10)
-  assert.ok(camera.position.clone().sub(controls.target).distanceTo(initial) < 1e-10)
+  target.dispatchEvent(Object.assign(new Event('keyup'), { code: 'KeyW' }))
+  for (const [forward, sideways, x, z] of [
+    ['KeyW', 'KeyD', 1, -1],
+    ['KeyW', 'KeyA', -1, -1],
+    ['KeyS', 'KeyD', 1, 1],
+    ['KeyS', 'KeyA', -1, 1],
+  ]) {
+    camera.position.copy(initial)
+    controls.target.set(0, 0, 0)
+    for (const code of [forward, sideways]) {
+      target.dispatchEvent(Object.assign(new Event('keydown'), { code }))
+    }
+    runtime.frame({}, 1 / 60)
+    const label = `${forward}+${sideways}`
+    const expectedDelta = new THREE.Vector3(x, 0, z).multiplyScalar(straightStep / Math.SQRT2)
+    const cameraDelta = camera.position.clone().sub(initial)
+    assert.equal(cameraDelta.y, 0, label)
+    assert.ok(cameraDelta.distanceTo(expectedDelta) < 1e-10, label)
+    assert.ok(controls.target.distanceTo(expectedDelta) < 1e-10, label)
+    assert.ok(camera.position.clone().sub(controls.target).distanceTo(initial) < 1e-10, label)
+    for (const code of [forward, sideways]) {
+      target.dispatchEvent(Object.assign(new Event('keyup'), { code }))
+    }
+  }
 })
 
 test('opposing movement keys cancel until one is released', (t) => {
